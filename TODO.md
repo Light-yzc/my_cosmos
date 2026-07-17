@@ -1,6 +1,6 @@
 # 项目交接 / TODO
 
-最后整理：2026-07-17
+最后整理：2026-07-17（Git 基线与滚动配置复核后）
 
 ## 1. 项目目标
 
@@ -309,7 +309,7 @@ CPU smoke tests 覆盖：
 最后一次已记录结果：
 
 ```text
-12 passed
+21 passed
 ```
 
 这是 CPU 小模型/逻辑测试，**不是**真实 0.8B + Wan + T5 的 GPU 端到端验证。
@@ -330,9 +330,11 @@ CPU smoke tests 覆盖：
   - T5 window 之间 offload。
   - gradient accumulation 32。
 
-## 9. P0：下一位应优先完成
+## 9. P0：当前状态与下一优先级
 
 ### P0.1 单会话滚动流水线
+
+**状态：首版已实现，待真实 GPU 集成验证。** `RollingWanDataset` 已在单进程内完成 raw tar 预取、分 bucket Wan 编码、encoder CPU/GPU 换入换出、按梯度累积倍数交付 latent block，以及基于 source cursor 的 checkpoint 恢复。滚动模式强制 `prefetch_shards=1`，DiT 与 optimizer 常驻 GPU；T5 在 Wan 编码阶段前已 offload。当前实现把滚动状态合并在原子 checkpoint 的 `data_cursor` 中，没有另设独立 rolling state JSON。
 
 目标流程：
 
@@ -348,77 +350,32 @@ CPU smoke tests 覆盖：
 → 继续训练，同时下载再下一 tar
 ```
 
-建议预取深度固定为 1，避免 `/content` 被多个 1.6 GB tar 和 checkpoint 撑满。
+实现落点：
 
-最小改造：
-
-1. 从 `scripts/train.py` 抽出常驻 `TrainerSession`：
-
-```text
-train_block(...)
-pause_for_vae()
-resume_after_vae()
-```
-
-2. 给 `WanImageVAE` 增加：
-
-```text
-move_to(device, dtype)
-offload_to_cpu()
-```
-
-3. 新增 `RollingCoordinator`：
-
-```text
-submit_raw_download(source) -> Future[Path]
-encode_raw_block(...)
-load_state()
-commit_state()
-```
-
-4. DiT 和 optimizer 始终留 GPU；Wan encoder 权重保留 CPU，只在编码阶段搬 GPU。
-
-5. 只能在 `micro_step % gradient_accumulation_steps == 0` 时切换到 VAE 阶段。当前 checkpoint 不保存未完成的梯度累积。
-
-6. 状态 JSON 至少记录：
-
-```text
-phase
-raw source index / source id
-active latent block
-trained sample index
-optimizer step
-checkpoint path
-```
-
-7. 正确提交顺序：
-
-```text
-checkpoint 落盘
-→ rolling state 原子落盘
-→ 标记块 consumed
-→ 删除 raw/latent
-```
+- `src/my_sd/data/raw_stream.py`：`RollingWanDataset`。
+- `WanImageVAE.move_to()` / `offload_to_cpu()` 同时移动 model 与 scale tensors。
+- block size 必须是 gradient accumulation 的倍数，VAE 只会在 optimizer step 边界换入。
+- raw tar 在 shard 消费完成后删除；中断恢复时重读当前 shard，并按 checkpoint cursor 跳过已训练样本。
+- 预取深度固定为 1，避免 `/content` 被多个 1.6 GB tar 和 checkpoint 撑满。
 
 ### P0.2 异步下载健壮性
 
-当前 `AsyncShardPrefetcher` 已能后台下载，但还缺：
+**状态：核心功能已实现。** `AsyncShardPrefetcher` 当前已有：
 
-- HTTP Range 断点续传。
+- HTTP Range 断点续传与 `.part` 恢复。
 - 自动重试和指数退避。
-- Content-Length 校验。
-- 可选 SHA256 校验。
-- 明确磁盘预算。
-- `.part` 恢复策略。
-- 当前文件训练时，只保留一个下一 raw tar。
+- Content-Length / Content-Range 大小校验。
+- `minimum_free_gb` 与 `max_cache_gb` 磁盘预算。
+- rolling raw 模式只保留一个预取 tar。
+- rolling 与 latent tar 两种后端共用同一套 YAML 下载限制解析。
 
-下载下一 raw tar 应发生在最长的 DiT 训练阶段，而不只是发生在 VAE 编码阶段。
+仍缺可选 SHA256 校验，以及真实 Hugging Face 大文件中断恢复压测。下载下一 raw tar 已发生在 DiT 消费当前 latent block 的阶段。
 
 ### P0.3 checkpoint 本地保存后镜像 Drive
 
-当前 Colab 配置把 checkpoint 直接写 Google Drive，会很慢，也容易留下半成品。
+**状态：首版已实现，待 Colab Drive 实测。** checkpoint 先写本地隐藏临时目录，再原子 rename；`AsyncCheckpointMirror` 单线程后台复制到 mirror，完成后原子更新 `latest.txt`。`--resume auto` 会同时搜索本地与 mirror，并忽略不完整 checkpoint；`keep_last_checkpoints` 同时控制两侧保留数量。
 
-应改为：
+当前实现流程：
 
 ```text
 /content/checkpoints_*
@@ -427,14 +384,14 @@ checkpoint 落盘
 → 后台复制到 /content/drive/MyDrive/...
 ```
 
-并增加：
+配置项：
 
 - `checkpoint_mirror_dir`。
 - `keep_last_checkpoints: 2`。
 - `auto resume` 同时搜索本地和 Drive mirror。
 - mirror 使用临时目录，完成后才更新 `latest.txt`。
 
-当前 `save_checkpoint()` 本身也不是目录级原子提交；中断后 `step-*` 可能不完整。
+真实 Colab 仍需验证 Drive 断开、重连和空间不足时，后台 mirror 的异常能否清晰上报。
 
 ### P0.4 真实 GPU 集成验证
 
@@ -451,15 +408,12 @@ checkpoint 落盘
 
 ## 10. P1：重要但可晚于首次跑通
 
-- 为 AnimeTimm 自动生成 HF shard list，避免手写 200 多行 URL。
-- `colab_encode_shards.py` 默认应拒绝没有 tag/caption 的样本；当前无 metadata 时会继续写空 caption。
-- 增加 rating 白名单参数，例如只用 `g,s`。
+以下项目已完成：AnimeTimm HF shard list CLI、默认拒绝缺失 metadata、rating 白名单、stream cursor 派生的确定性 caption/CFG dropout，以及最终 checkpoint 的 epoch/cursor 语义修复。
+
 - 增加最小尺寸、score、banned/deleted、AI-generated、duplicate 等过滤。
 - 对 DeepGHS 图片实现 Danbooru ID → metadata 分片联结。
 - 将 `iter_raw_tar()` 改成按连续同 key 成员流式组装；当前使用 `getmembers()` 和整 tar grouped dict，会额外占 RAM。
-- Caption/CFG dropout 改成由 `(seed, epoch, source_id, sample_index)` 派生的无状态随机数，保证 resume 后精确复现。
 - 处理 text window 预读和 checkpoint cursor 的严格一致性。
-- 修复最终 checkpoint 的 epoch/cursor 语义：当前训练结束后先 `epoch += 1` 再保存最终 checkpoint，可能使 cursor 的 epoch 与 checkpoint epoch 不一致。
 - 大规模 latent 不建议全部永久上传：512 的 48-channel FP16 latent 可能比 640px WebP 源图更大。先实际测单 shard 的输入/latent 大小，再决定永久缓存还是只做滚动临时缓存。
 - 增加 validation 数据和固定 prompt 采样。
 - 增加 loss、吞吐、显存和数据跳过率日志。
@@ -548,12 +502,10 @@ python scripts/train.py \
 
 ## 14. 建议的第一天接手顺序
 
-1. 初始化 Git，提交当前基线。
-2. 跑现有 12 个测试。
+1. 已完成：初始化 Git 并提交恢复基线。
+2. 已完成：本地 21 个 CPU/逻辑测试通过。
 3. 用 AnimeTimm 50k 的 1 个 tar 做真实 Wan encode smoke test。
 4. 用小 depth 配置训练 100–500 step，确认 loss、resume 和非方形 batch。
-5. 实现 P0.1 滚动协调器，让训练阶段异步下载下一 tar。
-6. 实现 P0.3 本地 checkpoint + Drive mirror。
-7. L4 上测 27 层峰值；若不稳定先用 20 层。
-8. 先跑 50k/150k 验证数据和重建质量，再考虑 full 5.3M。
-
+5. 在 Colab 实测 rolling raw 下载、Wan 换入换出与 checkpoint mirror。
+6. L4 上测 27 层峰值；若不稳定先用 20 层。
+7. 先跑 50k/150k 验证数据和重建质量，再考虑 full 5.3M。
