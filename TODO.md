@@ -76,11 +76,9 @@ text adapter              25,842,944
 - 训练主干时不需要 VAE decoder。
 - 离线编码脚本支持删除 decoder，仅保留 encoder。
 
-尚需处理：
+已处理：encoder-only 模式先在 CPU 加载完整 VAE，删除 decoder/conv2 后才搬到目标设备，避免完整 decoder 占用 GPU 峰值；`move_to()` / `offload_to_cpu()` 会同时移动 model 与 `vae.scale` tensors。
 
-- encoder-only 删除目前发生在完整 VAE 加载并搬到目标设备之后，首次加载有额外峰值；应调整成加载后先删除 decoder，再 cast/move。
-- 还没有在真实 Wan2.2 checkpoint 上做端到端 GPU 验证。
-- 为滚动模式增加 `move_to(device)` / `offload_to_cpu()`，同时移动 `vae.scale` 中的 mean/std tensor。
+仍需处理：还没有在真实 Wan2.2 checkpoint 上做端到端 GPU 验证。
 
 ## 3. 已完成的分辨率 buckets
 
@@ -309,7 +307,7 @@ CPU smoke tests 覆盖：
 最后一次已记录结果：
 
 ```text
-21 passed
+22 passed
 ```
 
 这是 CPU 小模型/逻辑测试，**不是**真实 0.8B + Wan + T5 的 GPU 端到端验证。
@@ -394,6 +392,8 @@ CPU smoke tests 覆盖：
 真实 Colab 仍需验证 Drive 断开、重连和空间不足时，后台 mirror 的异常能否清晰上报。
 
 ### P0.4 真实 GPU 集成验证
+
+本地只检测到 16 GB Tesla V100，且工作区没有 Wan2.2/T5 checkpoint，不能替代目标 L4/T4/22–24 GB 环境的验证。
 
 至少完成：
 

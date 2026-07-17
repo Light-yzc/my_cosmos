@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import importlib
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import torch
 from torch import Tensor
@@ -51,17 +51,20 @@ class WanImageVAE:
             sys.path.insert(0, repo_text)
         module = importlib.import_module("wan.modules.vae2_2")
         vae_type = getattr(module, "Wan2_2_VAE")
-        self.config = config
+        target_device = config.device
+        target_dtype = config.dtype
+        load_device = "cpu" if config.encoder_only else target_device
+        self.config = replace(config)
         self.vae = vae_type(
             z_dim=config.latent_channels,
             vae_pth=str(checkpoint),
-            dtype=_dtype(config.dtype),
-            device=config.device,
+            dtype=_dtype(target_dtype),
+            device=load_device,
         )
         if config.encoder_only:
             self.vae.model.decoder = torch.nn.Identity()
             self.vae.model.conv2 = torch.nn.Identity()
-        self.move_to(config.device, config.dtype)
+        self.move_to(target_device, target_dtype)
 
     def move_to(self, device: str, dtype: str | None = None) -> None:
         dtype_name = dtype or self.config.dtype
