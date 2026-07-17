@@ -24,6 +24,7 @@ train:
   keep_last_checkpoints: 2
   precision: bfloat16
   optimizer: adamw8bit
+  allow_optimizer_fallback: false
   gradient_accumulation_steps: 16
   text_cache_size: 256
   text_encode_batch_size: 32

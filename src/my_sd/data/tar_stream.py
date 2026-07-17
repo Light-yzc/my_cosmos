@@ -304,6 +304,10 @@ class StreamingLatentDataset(IterableDataset[dict[str, Any]]):
         sample_shuffle_buffer: int = 256,
         delete_after_use: bool = True,
         shuffle_shards: bool = True,
+        download_retries: int = 4,
+        download_timeout_seconds: int = 120,
+        minimum_free_bytes: int = 0,
+        max_cache_bytes: int | None = None,
         seed: int = 0,
     ) -> None:
         super().__init__()
@@ -316,6 +320,10 @@ class StreamingLatentDataset(IterableDataset[dict[str, Any]]):
         self.sample_shuffle_buffer = sample_shuffle_buffer
         self.delete_after_use = delete_after_use
         self.shuffle_shards = shuffle_shards
+        self.download_retries = download_retries
+        self.download_timeout_seconds = download_timeout_seconds
+        self.minimum_free_bytes = minimum_free_bytes
+        self.max_cache_bytes = max_cache_bytes
         self.seed = seed
         self.epoch = 0
         self.resume_epoch: int | None = None
@@ -357,6 +365,10 @@ class StreamingLatentDataset(IterableDataset[dict[str, Any]]):
             self.cache_dir / f"worker-{worker_id}",
             prefetch=self.prefetch_shards,
             delete_after_use=self.delete_after_use,
+            retries=self.download_retries,
+            timeout_seconds=self.download_timeout_seconds,
+            minimum_free_bytes=self.minimum_free_bytes,
+            max_cache_bytes=self.max_cache_bytes,
         )
         global_sample_index = 0
         for shard_offset, shard_path in enumerate(prefetcher):

@@ -40,7 +40,15 @@ def test_latent_tar_round_trip_and_stream_cursor(tmp_path) -> None:
         sample_shuffle_buffer=1,
         delete_after_use=False,
         shuffle_shards=False,
+        download_retries=7,
+        download_timeout_seconds=45,
+        minimum_free_bytes=123,
+        max_cache_bytes=456,
     )
+    assert dataset.download_retries == 7
+    assert dataset.download_timeout_seconds == 45
+    assert dataset.minimum_free_bytes == 123
+    assert dataset.max_cache_bytes == 456
     sample = next(iter(dataset))
     assert sample["caption"] == "1girl, blue hair"
     assert sample["source_shard_index"] == 0
@@ -49,4 +57,3 @@ def test_latent_tar_round_trip_and_stream_cursor(tmp_path) -> None:
 
     dataset.set_resume_cursor(epoch=0, shard_index=0, sample_index=0)
     assert list(dataset) == []
-

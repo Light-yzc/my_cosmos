@@ -10,7 +10,6 @@ import shutil
 import sys
 import time
 import uuid
-import warnings
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -40,6 +39,7 @@ from my_sd.data.raw_stream import RollingWanDataset
 from my_sd.encoders import T5GemmaEncoder, TextEncoderConfig
 from my_sd.models import CosmosDiT, CosmosDiTConfig
 from my_sd.training.flow_matching import flow_matching_loss, make_flow_matching_batch
+from my_sd.training.optimizers import build_optimizer
 from my_sd.training.text_cache import apply_cfg_dropout, encode_text_windows
 from my_sd.training.checkpoints import (
     AsyncCheckpointMirror,
@@ -85,30 +85,6 @@ def initialize_model(
     finally:
         torch.set_default_dtype(old_dtype)
     return model
-
-
-def build_optimizer(
-    model: CosmosDiT,
-    train_config: dict[str, Any],
-) -> torch.optim.Optimizer:
-    name = str(train_config.get("optimizer", "adamw")).lower()
-    kwargs = {
-        "lr": float(train_config["learning_rate"]),
-        "betas": tuple(train_config.get("betas", (0.9, 0.95))),
-        "weight_decay": float(train_config.get("weight_decay", 0.1)),
-    }
-    if name == "adamw8bit":
-        try:
-            import bitsandbytes as bnb
-
-            return bnb.optim.AdamW8bit(model.parameters(), **kwargs)
-        except (ImportError, RuntimeError) as error:
-            warnings.warn(
-                f"8-bit AdamW unavailable ({error}); falling back to torch AdamW. "
-                "This uses roughly 5-7 GB more memory.",
-                stacklevel=2,
-            )
-    return torch.optim.AdamW(model.parameters(), foreach=False, **kwargs)
 
 
 def learning_rate_multiplier(
