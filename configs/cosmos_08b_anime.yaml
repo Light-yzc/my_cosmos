@@ -1,0 +1,56 @@
+model:
+  latent_channels: 48
+  patch_size: 2
+  hidden_size: 1280
+  depth: 27
+  num_heads: 20
+  mlp_ratio: 4.0
+  context_dim: 1024
+  text_input_dim: 640
+  text_adapter_depth: 2
+  text_adapter_heads: 16
+  adaln_rank: 256
+  rope_theta: 10000.0
+  rope_extrapolation: 4.0
+  gradient_checkpointing: true
+
+text_encoder:
+  model_id: google/t5gemma-2-270m-270m
+  revision: main
+  max_length: 192
+  dtype: bfloat16
+  device: cuda
+  cpu_offload: false
+  encoder_only_checkpoint: false
+
+data:
+  manifest: data/cache/manifest.jsonl
+  batch_size: 1
+  num_workers: 4
+  horizontal_flip_probability: 0.0
+  general_tag_dropout: 0.10
+  character_tag_dropout: 0.02
+  shuffle_general_tags: true
+  max_tags: 128
+  replace_underscores: true
+
+train:
+  output_dir: checkpoints/cosmos_08b_anime
+  seed: 3407
+  max_steps: 500000
+  gradient_accumulation_steps: 16
+  learning_rate: 0.0001
+  warmup_steps: 2000
+  min_learning_rate_ratio: 0.1
+  betas: [0.9, 0.95]
+  weight_decay: 0.1
+  max_grad_norm: 1.0
+  optimizer: adamw8bit
+  precision: bfloat16
+  cfg_dropout: 0.15
+  text_cache_size: 256
+  text_encode_batch_size: 16
+  offload_text_encoder_between_windows: false
+  timestep_sampling: uniform
+  log_every: 10
+  save_every: 5000

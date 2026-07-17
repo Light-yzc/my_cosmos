@@ -1,0 +1,29 @@
+extends: colab_l4.yaml
+
+data:
+  backend: rolling_raw
+  shard_list: /content/raw_shards.txt
+  cache_dir: /content/raw_cache
+  batch_size: 1
+  num_workers: 0
+  prefetch_shards: 1
+  download_retries: 4
+  download_timeout_seconds: 120
+  minimum_free_gb: 2
+  max_cache_gb: 8
+  delete_after_use: true
+  resolution_stage: "512"
+  rolling_block_size: 2048
+  encode_batch_size: 4
+  max_upscale: 1.25
+  require_metadata: true
+  allowed_ratings: [g, s, q, e]
+  wan_repo: /content/Wan2.2
+  vae_checkpoint: /content/models/Wan2.2_VAE.pth
+  vae_dtype: bfloat16
+
+text_encoder:
+  cpu_offload: true
+
+train:
+  offload_text_encoder_between_windows: true

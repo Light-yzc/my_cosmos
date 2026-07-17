@@ -1,0 +1,31 @@
+extends: cosmos_08b_anime.yaml
+
+text_encoder:
+  model_id: /content/models/t5gemma2-270m-encoder
+  encoder_only_checkpoint: true
+  max_length: 192
+  dtype: bfloat16
+  device: cuda
+
+data:
+  backend: streaming_tar
+  shard_list: /content/latent_shards.txt
+  cache_dir: /content/shard_cache
+  batch_size: 1
+  num_workers: 0
+  prefetch_shards: 2
+  sample_shuffle_buffer: 256
+  delete_after_use: true
+  horizontal_flip_probability: 0.0
+
+train:
+  output_dir: /content/checkpoints_l4
+  checkpoint_mirror_dir: /content/drive/MyDrive/cosmos_anime/checkpoints_l4
+  keep_last_checkpoints: 2
+  precision: bfloat16
+  optimizer: adamw8bit
+  gradient_accumulation_steps: 16
+  text_cache_size: 256
+  text_encode_batch_size: 32
+  offload_text_encoder_between_windows: false
+  save_every: 250

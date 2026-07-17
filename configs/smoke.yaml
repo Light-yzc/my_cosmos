@@ -1,0 +1,16 @@
+model:
+  latent_channels: 8
+  patch_size: 2
+  hidden_size: 128
+  depth: 2
+  num_heads: 4
+  mlp_ratio: 2.0
+  context_dim: 96
+  text_input_dim: 64
+  text_adapter_depth: 1
+  text_adapter_heads: 4
+  adaln_rank: 16
+  rope_theta: 10000.0
+  rope_extrapolation: 1.0
+  gradient_checkpointing: false
+

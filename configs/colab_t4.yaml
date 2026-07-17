@@ -1,0 +1,17 @@
+extends: colab_l4.yaml
+
+model:
+  depth: 20
+
+text_encoder:
+  max_length: 128
+  dtype: float16
+
+train:
+  output_dir: /content/checkpoints_t4
+  checkpoint_mirror_dir: /content/drive/MyDrive/cosmos_anime/checkpoints_t4
+  precision: float16
+  gradient_accumulation_steps: 32
+  text_cache_size: 128
+  text_encode_batch_size: 16
+  offload_text_encoder_between_windows: true
