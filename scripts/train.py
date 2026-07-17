@@ -16,7 +16,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from safetensors.torch import load_file, save_file
+from safetensors.torch import save_file
 from torch.utils.data import DataLoader
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,7 +37,12 @@ from my_sd.data.tar_stream import (
 )
 from my_sd.data.raw_stream import RollingWanDataset
 from my_sd.encoders import T5GemmaEncoder, TextEncoderConfig
-from my_sd.models import CosmosDiT, CosmosDiTConfig
+from my_sd.models import (
+    CosmosDiT,
+    CosmosDiTConfig,
+    initialize_model,
+    load_model_weights,
+)
 from my_sd.training.flow_matching import flow_matching_loss, make_flow_matching_batch
 from my_sd.training.optimizers import build_optimizer
 from my_sd.training.text_cache import apply_cfg_dropout, encode_text_windows
@@ -69,22 +74,6 @@ def training_dtype(name: str) -> torch.dtype:
         return values[name.lower()]
     except KeyError as error:
         raise ValueError(f"Unsupported training precision: {name}") from error
-
-
-def initialize_model(
-    config: CosmosDiTConfig,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> CosmosDiT:
-    """Construct directly in the target dtype/device so every parameter is initialized."""
-    old_dtype = torch.get_default_dtype()
-    try:
-        torch.set_default_dtype(dtype)
-        with torch.device(device):
-            model = CosmosDiT(config)
-    finally:
-        torch.set_default_dtype(old_dtype)
-    return model
 
 
 def learning_rate_multiplier(
@@ -183,22 +172,20 @@ def load_checkpoint(
         raise FileNotFoundError(
             f"{checkpoint_dir} must contain model.safetensors and training_state.pt"
         )
-    weights = load_file(str(weights_path), device=str(device))
-    model.load_state_dict(weights, strict=True)
-    del weights
+    load_model_weights(model, weights_path)
     state = torch.load(
         training_path,
-        map_location=device,
+        map_location="cpu",
         weights_only=False,
     )
-    optimizer.load_state_dict(state["optimizer"])
-    scheduler.load_state_dict(state["scheduler"])
-    scaler.load_state_dict(state.get("scaler", {}))
-    random.setstate(state["python_rng_state"])
-    np.random.set_state(state["numpy_rng_state"])
-    torch.set_rng_state(state["torch_rng_state"].cpu())
+    optimizer.load_state_dict(state.pop("optimizer"))
+    scheduler.load_state_dict(state.pop("scheduler"))
+    scaler.load_state_dict(state.pop("scaler", {}))
+    random.setstate(state.pop("python_rng_state"))
+    np.random.set_state(state.pop("numpy_rng_state"))
+    torch.set_rng_state(state.pop("torch_rng_state").cpu())
     torch.cuda.set_rng_state_all(
-        [value.cpu() for value in state["cuda_rng_state"]]
+        [value.cpu() for value in state.pop("cuda_rng_state")]
     )
     return state
 
@@ -420,6 +407,7 @@ def main() -> None:
             dataset.set_resume_cursor(**cursor)
             last_data_cursor = cursor
         print(f"resumed {resume_path} at optimizer step {step}")
+        del restored
     print(f"trainable parameters: {model.trainable_parameter_count():,}")
     sample_count = f"{len(dataset):,}" if hasattr(dataset, "__len__") else "streaming"
     print(f"samples: {sample_count}; gradient accumulation: {accumulation}")
