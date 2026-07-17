@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -32,6 +32,24 @@ def read_shard_list(path: str | Path) -> list[str]:
     if not shards:
         raise ValueError(f"No shard paths or URLs found in {path}")
     return shards
+
+
+def shard_download_options(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Translate YAML download limits to the byte-based dataset API."""
+    return {
+        "download_retries": int(config.get("download_retries", 4)),
+        "download_timeout_seconds": int(
+            config.get("download_timeout_seconds", 120)
+        ),
+        "minimum_free_bytes": int(
+            float(config.get("minimum_free_gb", 0.0)) * 1024**3
+        ),
+        "max_cache_bytes": (
+            int(float(config["max_cache_gb"]) * 1024**3)
+            if config.get("max_cache_gb") is not None
+            else None
+        ),
+    }
 
 
 def _expand_hf_url(source: str) -> str:

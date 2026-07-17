@@ -31,7 +31,11 @@ from my_sd.data.latent_dataset import (
     LatentManifestDataset,
     collate_latents,
 )
-from my_sd.data.tar_stream import StreamingLatentDataset, read_shard_list
+from my_sd.data.tar_stream import (
+    StreamingLatentDataset,
+    read_shard_list,
+    shard_download_options,
+)
 from my_sd.data.raw_stream import RollingWanDataset
 from my_sd.encoders import T5GemmaEncoder, TextEncoderConfig
 from my_sd.models import CosmosDiT, CosmosDiTConfig
@@ -291,19 +295,7 @@ def main() -> None:
                 data_config.get("sample_shuffle_buffer", 256)
             ),
             delete_after_use=bool(data_config.get("delete_after_use", True)),
-            download_retries=int(data_config.get("download_retries", 4)),
-            download_timeout_seconds=int(
-                data_config.get("download_timeout_seconds", 120)
-            ),
-            minimum_free_bytes=int(
-                float(data_config.get("minimum_free_gb", 0.0))
-                * 1024**3
-            ),
-            max_cache_bytes=(
-                int(float(data_config["max_cache_gb"]) * 1024**3)
-                if data_config.get("max_cache_gb") is not None
-                else None
-            ),
+            **shard_download_options(data_config),
             seed=seed,
         )
         sampler = None
@@ -349,6 +341,7 @@ def main() -> None:
                 data_config.get("require_metadata", True)
             ),
             delete_after_use=bool(data_config.get("delete_after_use", True)),
+            **shard_download_options(data_config),
             seed=seed,
         )
         sampler = None

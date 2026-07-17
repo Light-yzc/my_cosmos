@@ -218,6 +218,10 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
             raise ValueError("Provide exactly one of wan_config or encoder_factory")
         if block_size < 1 or encode_batch_size < 1:
             raise ValueError("block_size and encode_batch_size must be positive")
+        if prefetch_shards != 1:
+            raise ValueError(
+                "rolling raw mode requires prefetch_shards=1 to bound disk usage"
+            )
         if accumulation_multiple < 1:
             raise ValueError("accumulation_multiple must be positive")
         if block_size % accumulation_multiple:

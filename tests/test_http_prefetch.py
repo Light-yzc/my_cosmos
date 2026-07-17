@@ -3,7 +3,24 @@ from __future__ import annotations
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from my_sd.data.tar_stream import AsyncShardPrefetcher
+from my_sd.data.tar_stream import AsyncShardPrefetcher, shard_download_options
+
+
+def test_download_options_convert_gibibytes_to_bytes() -> None:
+    options = shard_download_options(
+        {
+            "download_retries": 7,
+            "download_timeout_seconds": 45,
+            "minimum_free_gb": 1.5,
+            "max_cache_gb": 3,
+        }
+    )
+    assert options == {
+        "download_retries": 7,
+        "download_timeout_seconds": 45,
+        "minimum_free_bytes": int(1.5 * 1024**3),
+        "max_cache_bytes": 3 * 1024**3,
+    }
 
 
 def test_http_prefetch_resumes_existing_part_file(tmp_path) -> None:

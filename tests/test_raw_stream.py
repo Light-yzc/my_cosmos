@@ -3,6 +3,7 @@ import json
 import tarfile
 
 import torch
+import pytest
 from PIL import Image
 
 from my_sd.data.captions import DanbooruCaptionConfig, DanbooruCaptioner
@@ -134,3 +135,13 @@ def test_rolling_resume_skips_trained_source_samples(tmp_path) -> None:
     dataset.set_resume_cursor(epoch=0, shard_index=0, sample_index=0)
     samples = list(dataset)
     assert [sample["source_sample_index"] for sample in samples] == [1, 2]
+
+
+def test_rolling_dataset_rejects_more_than_one_prefetched_shard(tmp_path) -> None:
+    with pytest.raises(ValueError, match="prefetch_shards=1"):
+        RollingWanDataset(
+            [str(tmp_path / "raw.tar")],
+            encoder_factory=FakeEncoder,
+            cache_dir=tmp_path / "cache",
+            prefetch_shards=2,
+        )
