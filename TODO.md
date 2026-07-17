@@ -1,6 +1,6 @@
 # 项目交接 / TODO
 
-最后整理：2026-07-17（Git 基线与滚动配置复核后）
+最后整理：2026-07-17（Colab rolling 部署入口完成后）
 
 ## 1. 项目目标
 
@@ -14,7 +14,7 @@
 - 图片离线或滚动编码成 latent；文本保留动态 tag shuffle/dropout。
 - Colab 中异步下载下一 tar，同时训练当前 latent 块。
 
-当前仓库是从空目录搭建的，**目前不是 Git 仓库**。
+当前仓库是从空目录搭建的，现已初始化 Git，`main` 分支按可验证里程碑提交。
 
 ## 2. 已确定的模型方案
 
@@ -184,7 +184,7 @@ hf://datasets/OWNER/REPO/path/to/shard.tar
 - 可上传到 Hugging Face dataset repo。
 - 根据远端文件名跳过已经完成的 shard，可继续中断任务。
 
-当前 producer 只是在**编码当前 tar 时预取下一 tar**。用户最终要求的是在**训练当前 latent 时也后台下载下一 raw tar**；这个统一滚动协调器尚未实现，见 P0 TODO。
+独立 producer 仍只在编码当前 tar 时预取下一 tar；正式的 `rolling_raw` 训练后端已经能在训练当前 latent block 时后台下载下一 raw tar。
 
 ## 5. Danbooru 流式数据调研结论
 
@@ -273,7 +273,7 @@ Hugging Face tar shard
 - gradient accumulation。
 - gradient clipping。
 - cosine learning-rate schedule。
-- 8-bit AdamW；不可用时退回 PyTorch AdamW。
+- 8-bit AdamW；本地配置可显式 fallback，Colab 配置要求失败时立即停止。
 - 文本 window cache：
   - 一次读取 128/256 个 caption。
   - T5 以 16/32 的 batch 批量编码。
@@ -307,7 +307,7 @@ CPU smoke tests 覆盖：
 最后一次已记录结果：
 
 ```text
-22 passed
+31 passed
 ```
 
 这是 CPU 小模型/逻辑测试，**不是**真实 0.8B + Wan + T5 的 GPU 端到端验证。
@@ -327,6 +327,11 @@ CPU smoke tests 覆盖：
   - text window 128 / encode batch 16。
   - T5 window 之间 offload。
   - gradient accumulation 32。
+
+- `configs/colab_l4_rolling.yaml` / `configs/colab_t4_rolling.yaml`
+  - 直接消费 raw WebDataset，训练当前 latent block 时预取下一 tar。
+  - 严格要求 8-bit AdamW，不允许静默退回 FP32 optimizer state。
+  - `notebooks/colab_rolling_train.ipynb` 提供挂载、下载、预检、smoke 和 resume 入口。
 
 ## 9. P0：当前状态与下一优先级
 
@@ -403,7 +408,7 @@ CPU smoke tests 覆盖：
 4. 小 depth DiT 完整 forward/backward。
 5. 27 层 L4 显存峰值测试。
 6. 20 层 T4 显存峰值测试。
-7. bitsandbytes 不可用时不要在滚动模式静默退回 FP32 AdamW；显存可能直接超限。
+7. 已完成：Colab 配置在 bitsandbytes 不可用时直接失败，不再静默退回 FP32 AdamW。
 8. 分别测下载、VAE encode、T5 encode、DiT forward/backward 的吞吐。
 
 ## 10. P1：重要但可晚于首次跑通
@@ -432,8 +437,6 @@ CPU smoke tests 覆盖：
 - aesthetic / quality scorer。
 - 自然语言 caption 混合。
 - 1024 高质量数据源和精修 recipe。
-- Colab notebook。
-- Hugging Face dataset 自动创建 shard list 的 CLI。
 
 ## 12. 已知风险
 
@@ -488,7 +491,7 @@ python scripts/colab_encode_shards.py \
 
 ```bash
 python scripts/train.py \
-  --config configs/colab_l4.yaml \
+  --config configs/colab_l4_rolling.yaml \
   --resume auto
 ```
 
@@ -496,16 +499,16 @@ python scripts/train.py \
 
 ```bash
 python scripts/train.py \
-  --config configs/colab_t4.yaml \
+  --config configs/colab_t4_rolling.yaml \
   --resume auto
 ```
 
 ## 14. 建议的第一天接手顺序
 
 1. 已完成：初始化 Git 并提交恢复基线。
-2. 已完成：本地 21 个 CPU/逻辑测试通过。
+2. 已完成：本地 31 个 CPU/逻辑测试通过。
 3. 用 AnimeTimm 50k 的 1 个 tar 做真实 Wan encode smoke test。
 4. 用小 depth 配置训练 100–500 step，确认 loss、resume 和非方形 batch。
-5. 在 Colab 实测 rolling raw 下载、Wan 换入换出与 checkpoint mirror。
+5. 已完成本地部署入口与 preflight；仍需在 Colab 实测 rolling raw 下载、Wan 换入换出与 checkpoint mirror。
 6. L4 上测 27 层峰值；若不稳定先用 20 层。
 7. 先跑 50k/150k 验证数据和重建质量，再考虑 full 5.3M。

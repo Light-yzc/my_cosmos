@@ -10,6 +10,8 @@
 - 7 个固定比例的 512、768、1024 三档 resolution buckets；
 - Danbooru 分类 tag 的动态 shuffle/dropout；
 - 离线 latent 缓存、同 bucket batch、rectified-flow 训练；
+- raw WebDataset 滚动编码、下一 shard 异步预取与 source cursor 恢复；
+- 本地原子 checkpoint 与 Google Drive 后台镜像；
 - BF16、SDPA、activation checkpointing、梯度累积和可选 8-bit AdamW。
 
 ## 最终结构
@@ -138,6 +140,12 @@ python -m venv .venv
 pip install -e .
 ```
 
+训练环境应安装训练依赖：
+
+```powershell
+pip install -e ".[train]"
+```
+
 获取 Wan2.2 源码和 VAE：
 
 ```powershell
@@ -150,6 +158,12 @@ T5Gemma-2 使用 Gemma license，需要先在其 Hugging Face 页面接受条款
 ```powershell
 hf auth login
 ```
+
+## Colab 滚动流式训练
+
+Colab 部署入口是 [`notebooks/colab_rolling_train.ipynb`](notebooks/colab_rolling_train.ipynb)，完整说明见 [`docs/COLAB.md`](docs/COLAB.md)。notebook 会挂载 Drive、安装项目、登录 Hugging Face、准备 Wan/T5、生成 AnimeTimm shard list、运行环境预检，然后以 `--resume auto` 启动 rolling raw 训练。
+
+默认 notebook 是隔离的单 shard smoke run，只训练 8 个 optimizer step。验证通过后再将 `SMOKE_RUN=False`、`SHARD_LIMIT=None` 并切换到正式数据集。不要在同一个正式 checkpoint 任务中途改变 shard list。
 
 ## 数据准备
 
@@ -206,11 +220,11 @@ python scripts/inspect_model.py --config configs/cosmos_08b_anime.yaml
 - 每层 activation checkpoint；
 - micro-batch 1；
 - gradient accumulation 16；
-- VAE 不在训练进程中；
+- 离线 latent 模式不加载 VAE；rolling raw 模式只在 block 边界换入 Wan encoder；
 - T5Gemma encoder 冻结；
 - 优先使用 8-bit AdamW。
 
-如果 `bitsandbytes` 不可用，训练脚本会退回 PyTorch AdamW，但显存会明显增加。依次减压：
+本地配置可以显式允许在 `bitsandbytes` 不可用时退回 PyTorch AdamW，但所有 Colab 配置默认禁止 fallback，避免额外约 5–7 GB optimizer state 直接导致 OOM。显存不足时依次减压：
 
 1. 先用 512 桶；
 2. 将 text encoder 放到 CPU（会明显变慢）；
@@ -229,6 +243,7 @@ python scripts/inspect_model.py --config configs/cosmos_08b_anime.yaml
 - rectified-flow 两端点；
 - bucket 选择和 Danbooru caption 规则；
 - 27 层正式配置的 meta-device 参数精算。
+- rolling raw block、HTTP Range 恢复、原子 checkpoint mirror 和 Colab preflight。
 
 运行：
 
@@ -243,4 +258,3 @@ pytest
 - [Wan2.2 官方代码](https://github.com/Wan-Video/Wan2.2)
 - [Wan2.2-TI2V-5B](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B)
 - [Google T5Gemma-2-270M-270M](https://huggingface.co/google/t5gemma-2-270m-270m)
-

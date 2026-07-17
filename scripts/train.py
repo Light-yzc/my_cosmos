@@ -203,19 +203,47 @@ def load_checkpoint(
     return state
 
 
-def main() -> None:
+def create_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/cosmos_08b_anime.yaml")
     parser.add_argument(
         "--resume",
         help="Checkpoint directory, training_state.pt path, or 'auto'.",
     )
-    args = parser.parse_args()
+    parser.add_argument("--max-steps", type=int)
+    parser.add_argument("--rolling-block-size", type=int)
+    parser.add_argument("--output-dir")
+    parser.add_argument("--checkpoint-mirror-dir")
+    return parser
+
+
+def apply_runtime_overrides(
+    args: argparse.Namespace,
+    data_config: dict[str, Any],
+    train_config: dict[str, Any],
+) -> None:
+    if args.max_steps is not None:
+        if args.max_steps < 1:
+            raise ValueError("--max-steps must be positive")
+        train_config["max_steps"] = args.max_steps
+    if args.rolling_block_size is not None:
+        if args.rolling_block_size < 1:
+            raise ValueError("--rolling-block-size must be positive")
+        data_config["rolling_block_size"] = args.rolling_block_size
+    if args.output_dir is not None:
+        train_config["output_dir"] = args.output_dir
+    if args.checkpoint_mirror_dir is not None:
+        train_config["checkpoint_mirror_dir"] = args.checkpoint_mirror_dir
+
+
+def main() -> None:
+    args = create_argument_parser().parse_args()
     raw = load_yaml(args.config)
     model_config = CosmosDiTConfig.from_dict(require_section(raw, "model"))
     text_config = TextEncoderConfig(**require_section(raw, "text_encoder"))
     data_config = require_section(raw, "data")
     train_config = require_section(raw, "train")
+    apply_runtime_overrides(args, data_config, train_config)
     accumulation = int(train_config.get("gradient_accumulation_steps", 1))
 
     if not torch.cuda.is_available():
