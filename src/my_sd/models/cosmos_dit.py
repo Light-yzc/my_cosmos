@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass
-from functools import partial
+from functools import lru_cache, partial
 from typing import Any
 
 import torch
@@ -11,6 +11,33 @@ from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
 from .text_adapter import TextConditioningAdapter
+
+SELF_ATTENTION_BACKENDS = frozenset({"sdpa", "flash_attn_2"})
+
+
+@lru_cache(maxsize=1)
+def _flash_attention_2_kernel():
+    try:
+        from flash_attn import flash_attn_qkvpacked_func
+    except (ImportError, RuntimeError) as error:
+        raise RuntimeError(
+            "model.self_attention_backend=flash_attn_2 requires the external "
+            "`flash-attn` package with a CUDA-compatible build"
+        ) from error
+    return flash_attn_qkvpacked_func
+
+
+def flash_attention_2(qkv: Tensor) -> Tensor:
+    """Run external FlashAttention-2 on packed [B, S, 3, H, D] QKV."""
+    if not qkv.is_cuda:
+        raise RuntimeError("FlashAttention-2 requires CUDA tensors")
+    if qkv.dtype not in {torch.float16, torch.bfloat16}:
+        raise RuntimeError("FlashAttention-2 requires FP16 or BF16 activations")
+    return _flash_attention_2_kernel()(
+        qkv.contiguous(),
+        dropout_p=0.0,
+        causal=False,
+    )
 
 
 def _rms_norm(x: Tensor, weight: Tensor, eps: float = 1e-6) -> Tensor:
@@ -41,6 +68,7 @@ class CosmosDiTConfig:
     rope_theta: float = 10000.0
     rope_extrapolation: float = 4.0
     gradient_checkpointing: bool = True
+    self_attention_backend: str = "sdpa"
 
     @classmethod
     def from_dict(cls, values: dict[str, Any]) -> "CosmosDiTConfig":
@@ -63,6 +91,11 @@ class CosmosDiTConfig:
             raise ValueError("patch_size must be positive")
         if self.depth < 1:
             raise ValueError("depth must be positive")
+        if self.self_attention_backend not in SELF_ATTENTION_BACKENDS:
+            raise ValueError(
+                "self_attention_backend must be one of "
+                f"{sorted(SELF_ATTENTION_BACKENDS)}"
+            )
 
 
 class AxialRoPE2D(nn.Module):
@@ -109,10 +142,19 @@ class AxialRoPE2D(nn.Module):
 
 
 class SelfAttention2D(nn.Module):
-    def __init__(self, width: int, num_heads: int) -> None:
+    def __init__(
+        self,
+        width: int,
+        num_heads: int,
+        *,
+        backend: str = "sdpa",
+    ) -> None:
         super().__init__()
+        if backend not in SELF_ATTENTION_BACKENDS:
+            raise ValueError(f"Unknown self-attention backend: {backend}")
         self.num_heads = num_heads
         self.head_dim = width // num_heads
+        self.backend = backend
         self.qkv = nn.Linear(width, width * 3)
         self.output = nn.Linear(width, width)
         self.q_norm = nn.Parameter(torch.ones(self.head_dim))
@@ -129,6 +171,11 @@ class SelfAttention2D(nn.Module):
         sin = sin[None, :, None, :]
         q = q * cos + _rotate_pairs(q) * sin
         k = k * cos + _rotate_pairs(k) * sin
+        if self.backend == "flash_attn_2":
+            packed = torch.stack((q, k, v), dim=2)
+            out = flash_attention_2(packed).reshape(batch, length, width)
+            return self.output(out)
+
         q, k, v = (tensor.transpose(1, 2) for tensor in (q, k, v))
         out = F.scaled_dot_product_attention(q, k, v)
         out = out.transpose(1, 2).reshape(batch, length, width)
@@ -226,13 +273,18 @@ class CosmosBlock(nn.Module):
         num_heads: int,
         mlp_ratio: float,
         adaln_rank: int,
+        self_attention_backend: str,
     ) -> None:
         super().__init__()
         norm = partial(nn.LayerNorm, elementwise_affine=False, eps=1e-6)
         self.self_norm = norm(width)
         self.cross_norm = norm(width)
         self.mlp_norm = norm(width)
-        self.self_attention = SelfAttention2D(width, num_heads)
+        self.self_attention = SelfAttention2D(
+            width,
+            num_heads,
+            backend=self_attention_backend,
+        )
         self.cross_attention = CrossAttention(width, context_dim, num_heads)
         self.feed_forward = FeedForward(width, mlp_ratio)
         self.self_modulation = AdaLNLoRA(width, adaln_rank)
@@ -338,6 +390,7 @@ class CosmosDiT(nn.Module):
                 num_heads=config.num_heads,
                 mlp_ratio=config.mlp_ratio,
                 adaln_rank=config.adaln_rank,
+                self_attention_backend=config.self_attention_backend,
             )
             for _ in range(config.depth)
         )

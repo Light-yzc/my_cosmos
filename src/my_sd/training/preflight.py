@@ -65,10 +65,28 @@ def run_colab_preflight(
     config_file = Path(config_path).resolve()
     working_dir = Path(cwd).resolve() if cwd is not None else Path.cwd().resolve()
     raw = load_yaml(config_file)
+    model = require_section(raw, "model")
     data = require_section(raw, "data")
     train = require_section(raw, "train")
     text = require_section(raw, "text_encoder")
     checks: list[PreflightCheck] = []
+
+    attention_backend = str(model.get("self_attention_backend", "sdpa"))
+    if attention_backend == "flash_attn_2":
+        try:
+            importlib.import_module("flash_attn")
+        except (ImportError, RuntimeError) as error:
+            checks.append(
+                PreflightCheck(
+                    "error",
+                    "FlashAttention-2",
+                    f"flash_attn unavailable: {error}",
+                )
+            )
+        else:
+            checks.append(
+                PreflightCheck("ok", "FlashAttention-2", "external flash_attn")
+            )
 
     backend = str(data.get("backend", "manifest"))
     checks.append(PreflightCheck("ok", "backend", backend))
@@ -234,6 +252,17 @@ def run_colab_preflight(
                     f"{properties.name}; {memory_gib:.1f} GiB",
                 )
             )
+            if (
+                attention_backend == "flash_attn_2"
+                and torch.cuda.get_device_capability(0)[0] < 8
+            ):
+                checks.append(
+                    PreflightCheck(
+                        "error",
+                        "FlashAttention-2 GPU",
+                        "external FA2 requires an Ampere, Ada, or Hopper GPU",
+                    )
+                )
             requests_bf16 = any(
                 value in {"bfloat16", "bf16"}
                 for value in (precision, parameter_precision)

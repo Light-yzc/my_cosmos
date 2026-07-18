@@ -56,6 +56,11 @@ def main() -> int:
         help="Parameter/master-weight dtype; auto uses FP32 for FP16 compute.",
     )
     parser.add_argument("--depth", type=int)
+    parser.add_argument(
+        "--self-attention-backend",
+        choices=("sdpa", "flash_attn_2"),
+        help="Override model.self_attention_backend.",
+    )
     parser.add_argument("--text-length", type=int, default=128)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--iterations", type=int, default=3)
@@ -86,6 +91,8 @@ def main() -> int:
     values = dict(require_section(raw, "model"))
     if args.depth is not None:
         values["depth"] = args.depth
+    if args.self_attention_backend is not None:
+        values["self_attention_backend"] = args.self_attention_backend
     if args.gradient_checkpointing is not None:
         values["gradient_checkpointing"] = args.gradient_checkpointing
     config = CosmosDiTConfig.from_dict(values)
@@ -198,7 +205,8 @@ def main() -> int:
     print(
         f"compute_precision={args.precision} parameter_dtype={parameter_dtype} "
         f"scaler={scaler.is_enabled()} checkpointing={config.gradient_checkpointing} "
-        f"sdpa={args.sdpa_backend} backward={not args.forward_only} "
+        f"self_attention={config.self_attention_backend} "
+        f"remaining_sdpa={args.sdpa_backend} backward={not args.forward_only} "
         f"optimizer={args.optimizer}"
     )
     print(

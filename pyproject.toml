@@ -26,9 +26,22 @@ train = [
   "bitsandbytes>=0.45; platform_system != 'Windows'",
   "tensorboard>=2.18",
 ]
+fa2 = [
+  "flash-attn>=2.8; platform_system == 'Linux'",
+  "ninja>=1.11",
+  "packaging>=24",
+  "psutil>=6",
+]
 test = [
   "pytest>=8.0",
 ]
+
+[tool.uv]
+no-build-isolation-package = ["flash-attn"]
+
+[[tool.uv.dependency-metadata]]
+name = "flash-attn"
+requires-dist = ["torch", "einops"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

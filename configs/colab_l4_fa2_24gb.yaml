@@ -1,0 +1,35 @@
+extends: colab_l4_rolling.yaml
+
+model:
+  depth: 27
+  self_attention_backend: flash_attn_2
+  gradient_checkpointing: true
+
+text_encoder:
+  max_length: 192
+  dtype: bfloat16
+  device: cuda
+  cpu_offload: true
+
+data:
+  resolution_stage: "768"
+  rolling_block_size: 2048
+  encode_batch_size: 4
+  prefetch_shards: 1
+  minimum_free_gb: 10
+  max_cache_gb: 12
+
+train:
+  output_dir: /content/checkpoints_l4_fa2
+  checkpoint_mirror_dir: /content/drive/MyDrive/cosmos
+  keep_last_checkpoints: 2
+  precision: bfloat16
+  parameter_precision: bfloat16
+  optimizer: adamw8bit
+  allow_optimizer_fallback: false
+  gradient_accumulation_steps: 16
+  text_cache_size: 512
+  text_encode_batch_size: 64
+  offload_text_encoder_between_windows: true
+  save_every: 1000
+  log_every: 10

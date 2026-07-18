@@ -163,6 +163,12 @@ hf auth login
 
 Colab 部署入口是 [`notebooks/colab_rolling_train.ipynb`](notebooks/colab_rolling_train.ipynb)，完整说明见 [`docs/COLAB.md`](docs/COLAB.md)。notebook 会挂载 Drive、安装项目、登录 Hugging Face、准备 Wan/T5、生成 AnimeTimm shard list、运行环境预检，然后以 `--resume auto` 启动 rolling raw 训练。
 
+L4 24GB + 外部 FlashAttention-2 的专用配置是
+`configs/colab_l4_fa2_24gb.yaml`，安装、FA2/SDPA 对照 benchmark 和
+Drive 恢复说明见 [`docs/L4_FA2.md`](docs/L4_FA2.md)。该配置将本地
+checkpoint 原子写入 `/content/checkpoints_l4_fa2`，再后台镜像到
+`/content/drive/MyDrive/cosmos`。
+
 默认 notebook 是隔离的单 shard smoke run，只训练 8 个 optimizer step。验证通过后再将 `SMOKE_RUN=False`、`SHARD_LIMIT=None` 并切换到正式数据集。不要在同一个正式 checkpoint 任务中途改变 shard list。
 
 ## 数据准备

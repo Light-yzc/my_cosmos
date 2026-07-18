@@ -307,7 +307,7 @@ CPU smoke tests 覆盖：
 最后一次已记录结果（本机 CUDA PyTorch 环境）：
 
 ```text
-36 passed
+39 passed
 ```
 
 此外已在 Tesla V100-SXM2-16GB、PyTorch 2.6.0+cu124 上完成真实 0.83B DiT 的 forward/backward、GradScaler 与 AdamW8bit optimizer step；仍不是 Wan + T5 + DiT 的完整端到端验证。
@@ -328,6 +328,9 @@ attention 后端实测：
 - Windows PyTorch 未编译 FlashAttention，且 V100 是 SM70，不适合安装 FA2/FA3。
 - PyTorch memory-efficient SDPA 可用；在 width 1280 / depth 2 / 512×768 对照中约 `0.067 s/step`，强制 math 约 `0.090 s/step`，快约 26%。
 - 默认 `auto` 已会选择可用的高效 kernel；无需在 V100 上强装 FlashAttention。
+- 已增加外部 FA2 packed-QKV 图像 self-attention backend、L4 专用配置和
+  `scripts/benchmark_l4_attention.py`；本机 V100 无法执行外部 FA2，
+  真实加速比例必须在 L4 上运行对照脚本后填写。
 
 ## 8. Colab 配置
 
@@ -524,7 +527,7 @@ python scripts/train.py \
 ## 14. 建议的第一天接手顺序
 
 1. 已完成：初始化 Git 并提交恢复基线。
-2. 已完成：本地 36 个 CPU/逻辑测试通过，并完成 0.83B DiT CUDA optimizer smoke。
+2. 已完成：本地 39 个 CPU/逻辑测试通过，并完成 0.83B DiT CUDA optimizer smoke。
 3. 用 AnimeTimm 50k 的 1 个 tar 做真实 Wan encode smoke test。
 4. 用小 depth 配置训练 100–500 step，确认 loss、resume 和非方形 batch。
 5. 已完成本地部署入口与 preflight；仍需在 Colab 实测 rolling raw 下载、Wan 换入换出与 checkpoint mirror。

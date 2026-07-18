@@ -403,6 +403,7 @@ def main() -> None:
         f"compute dtype: {dtype}; parameter dtype: {parameter_dtype}; "
         f"gradient scaler: {scaler.is_enabled()}"
     )
+    print(f"self-attention backend: {model_config.self_attention_backend}")
     sample_count = f"{len(dataset):,}" if hasattr(dataset, "__len__") else "streaming"
     print(f"samples: {sample_count}; gradient accumulation: {accumulation}")
 
