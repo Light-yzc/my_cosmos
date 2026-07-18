@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from my_sd.training.preflight import run_colab_preflight
@@ -45,6 +46,25 @@ train:
     return config
 
 
+def _write_metadata_index(tmp_path: Path) -> Path:
+    root = tmp_path / "metadata"
+    for bucket in range(900, 1000):
+        partition = root / f"bucket={bucket:04d}"
+        partition.mkdir(parents=True)
+        (partition / "data.parquet").write_bytes(b"stub")
+    (root / "_index_manifest.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "source_repo": "deepghs/danbooru2024-webp-4Mpixel",
+                "source_filename": "metadata.parquet",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return root
+
+
 def test_preflight_accepts_complete_rolling_configuration(tmp_path) -> None:
     report = run_colab_preflight(
         _write_config(tmp_path),
@@ -68,3 +88,22 @@ def test_preflight_rejects_block_outside_optimizer_boundary(tmp_path) -> None:
     )
     assert not report.ok
     assert any(check.name == "rolling block" for check in report.errors)
+
+
+def test_preflight_rejects_legacy_deepghs_metadata_index(tmp_path) -> None:
+    config = _write_config(tmp_path)
+    metadata = _write_metadata_index(tmp_path)
+    (metadata / "_index_manifest.json").unlink()
+    text = config.read_text(encoding="utf-8").replace(
+        "  cache_dir:",
+        f"  metadata_index_dir: {metadata.as_posix()}\n  cache_dir:",
+    )
+    config.write_text(text, encoding="utf-8")
+    report = run_colab_preflight(
+        config,
+        cwd=tmp_path,
+        require_cuda=False,
+        check_bitsandbytes=False,
+    )
+    assert not report.ok
+    assert any(check.name == "DeepGHS metadata" for check in report.errors)

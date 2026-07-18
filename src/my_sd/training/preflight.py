@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import shutil
 import urllib.parse
@@ -14,6 +15,9 @@ from my_sd.config import load_yaml, require_section
 from my_sd.data.tar_stream import read_shard_list
 
 CheckLevel = Literal["ok", "warning", "error"]
+DEEPGHS_INDEX_VERSION = 2
+DEEPGHS_SOURCE_REPO = "deepghs/danbooru2024-webp-4Mpixel"
+DEEPGHS_SOURCE_FILENAME = "metadata.parquet"
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +115,7 @@ def run_colab_preflight(
         )
 
     accumulation = int(train.get("gradient_accumulation_steps", 1))
+    train_batch_size = int(data.get("batch_size", 1))
     wandb_config = train.get("wandb", {})
     if isinstance(wandb_config, dict) and wandb_config.get("enabled", False):
         if os.environ.get("WANDB_API_KEY") or Path.home().joinpath(".netrc").is_file():
@@ -129,13 +134,19 @@ def run_colab_preflight(
         )
     elif backend == "rolling_raw":
         block_size = int(data.get("rolling_block_size", 0))
-        if block_size < 1 or block_size % accumulation:
+        effective_batch = accumulation * train_batch_size
+        if (
+            train_batch_size < 1
+            or block_size < 1
+            or block_size % effective_batch
+        ):
             checks.append(
                 PreflightCheck(
                     "error",
                     "rolling block",
                     f"rolling_block_size={block_size} must be a positive multiple "
-                    f"of gradient_accumulation_steps={accumulation}",
+                    f"of batch_size*gradient_accumulation_steps="
+                    f"{train_batch_size}*{accumulation}",
                 )
             )
         else:
@@ -143,7 +154,8 @@ def run_colab_preflight(
                 PreflightCheck(
                     "ok",
                     "rolling block",
-                    f"{block_size} samples; optimizer boundary every {accumulation}",
+                    f"{block_size} samples; microbatch={train_batch_size}; "
+                    f"optimizer boundary every {effective_batch} samples",
                 )
             )
         if int(data.get("prefetch_shards", 1)) != 1:
@@ -160,6 +172,15 @@ def run_colab_preflight(
                     "error",
                     "text cache",
                     "rolling_raw requires train.text_cache_size > 0",
+                )
+            )
+        elif int(train.get("text_cache_size", 0)) % train_batch_size:
+            checks.append(
+                PreflightCheck(
+                    "error",
+                    "text cache",
+                    "train.text_cache_size must be divisible by "
+                    "data.batch_size",
                 )
             )
 
@@ -212,6 +233,7 @@ def run_colab_preflight(
             metadata_index = _path_value(metadata_index_value, working_dir)
             partitions = list(metadata_index.glob("bucket=*/*.parquet"))
             partitions.extend(metadata_index.glob("????.parquet"))
+            metadata_manifest = metadata_index / "_index_manifest.json"
             if not partitions:
                 checks.append(
                     PreflightCheck(
@@ -220,14 +242,52 @@ def run_colab_preflight(
                         f"no metadata partitions found under {metadata_index}",
                     )
                 )
-            else:
+            elif not metadata_manifest.is_file():
                 checks.append(
                     PreflightCheck(
-                        "ok",
+                        "error",
                         "DeepGHS metadata",
-                        f"{len(partitions)} partition(s) under {metadata_index}",
+                        "legacy index has no same-source manifest; rerun "
+                        "scripts/prepare_deepghs_metadata.py",
                     )
                 )
+            else:
+                try:
+                    manifest_value = json.loads(
+                        metadata_manifest.read_text(encoding="utf-8")
+                    )
+                except (OSError, json.JSONDecodeError) as error:
+                    checks.append(
+                        PreflightCheck(
+                            "error",
+                            "DeepGHS metadata",
+                            f"invalid index manifest: {error}",
+                        )
+                    )
+                else:
+                    current = (
+                        manifest_value.get("version")
+                        == DEEPGHS_INDEX_VERSION
+                        and manifest_value.get("source_repo")
+                        == DEEPGHS_SOURCE_REPO
+                        and manifest_value.get("source_filename")
+                        == DEEPGHS_SOURCE_FILENAME
+                        and 900 <= len(partitions) <= 1100
+                    )
+                    checks.append(
+                        PreflightCheck(
+                            "ok" if current else "error",
+                            "DeepGHS metadata",
+                            (
+                                f"{len(partitions)} same-source partition(s) "
+                                f"under {metadata_index}"
+                                if current
+                                else "index manifest/source is stale or "
+                                "mismatched; rerun "
+                                "scripts/prepare_deepghs_metadata.py"
+                            ),
+                        )
+                    )
         wan_repo = _path_value(data.get("wan_repo", ""), working_dir)
         wan_module = wan_repo / "wan" / "modules" / "vae2_2.py"
         if not wan_module.is_file():

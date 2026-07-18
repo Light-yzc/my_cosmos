@@ -12,7 +12,9 @@
 - 离线 latent 缓存、同 bucket batch、rectified-flow 训练；
 - raw WebDataset 滚动编码、下一 shard 异步预取与 source cursor 恢复；
 - 本地原子 checkpoint 与 Google Drive 后台镜像；
-- BF16、SDPA、activation checkpointing、梯度累积和可选 8-bit AdamW。
+- BF16、SDPA/FlashAttention-2、可切换 activation checkpointing、同 ratio
+  microbatch 和 8-bit AdamW；
+- Euler/Heun rectified-flow、CFG 与 Wan2.2 解码的低显存采样入口。
 
 ## 最终结构
 
@@ -41,7 +43,8 @@ NVIDIA 没有公开 Cosmos 0.8B。官方最接近的是 Cosmos-Predict2-0.6B-Tex
 
 ## 为什么这样处理图片和文本
 
-结论是：**图片离线缓存 VAE latent；文本 hidden states 在线计算。**
+结论是：**本地长期训练可离线缓存 VAE latent；Colab 大数据用滚动
+VAE 缓存；文本 hidden states 按窗口在线计算。**
 
 图片侧不要在每个训练 batch 里运行 VAE。Wan VAE checkpoint 的 FP32 文件约 2.8 GB，训练时重复 encode 会浪费显存和大量算力。离线把最终 crop 编成 FP16 latent：
 
@@ -52,7 +55,7 @@ NVIDIA 没有公开 Cosmos 0.8B。官方最接近的是 Cosmos-Predict2-0.6B-Tex
 
 训练时完全不加载 VAE。不要缓存裁好的 FP16 RGB tensor：它更大，而且仍然需要运行 VAE。
 
-文本侧不要只缓存一份 encoder hidden state。Danbooru tag 最有用的正则化正是每轮 shuffle、局部 dropout 和不同 caption 配方；整句 embedding 一旦缓存，这些变化就被锁死。270M encoder 的 BF16 常驻量约 0.5 GB，冻结并在 `inference_mode` 下在线运行更合适。
+文本侧不要永久缓存一份 encoder hidden state。Danbooru tag 最有用的正则化正是每轮 shuffle、局部 dropout 和不同 caption 配方；整句 embedding 一旦缓存，这些变化就被锁死。270M encoder 冻结后用 `no_grad` 按 224 条窗口批量编码，hidden state 只在 CPU RAM 暂存到当前窗口训练结束。
 
 数据量很大后，可以提前缓存 4–8 组 caption variant 的 token IDs，但仍然在线跑 encoder。不要先缓存单 tag embedding 再拼接：双向 encoder 中每个 token 的结果依赖完整上下文。
 
@@ -92,7 +95,8 @@ NVIDIA 没有公开 Cosmos 0.8B。官方最接近的是 Cosmos-Predict2-0.6B-Tex
 在 22 GB 卡上，建议：
 
 1. 用 512 桶完成架构和数据清洗验证，并承担大部分早期训练；
-2. 切换 768 桶做主质量阶段，batch size 1、gradient accumulation 16；
+2. 切换 768 桶做主质量阶段；L4 专用配置使用同 ratio microbatch 4、
+   gradient accumulation 4，有效 batch 仍为 16；
 3. 模型已经稳定后，再用 1024 桶做少量精修。
 
 768 桶经过 VAE 和 patch 后只有约 576–600 个图像 token；1024 桶约 943–1024 token。不同阶段需要分别从原图生成 latent，不能直接把低分辨率 latent 放大。
@@ -161,7 +165,10 @@ hf auth login
 
 ## Colab 滚动流式训练
 
-Colab 部署入口是 [`notebooks/colab_rolling_train.ipynb`](notebooks/colab_rolling_train.ipynb)，完整说明见 [`docs/COLAB.md`](docs/COLAB.md)。notebook 会挂载 Drive、安装项目、登录 Hugging Face、准备 Wan/T5、生成 AnimeTimm shard list、运行环境预检，然后以 `--resume auto` 启动 rolling raw 训练。
+DeepGHS 8M 数据的推荐入口与完整命令见
+[`COLAB_DEEPGHS.md`](COLAB_DEEPGHS.md)。bootstrap 会挂载 Drive、准备
+Wan/T5、建立同源 metadata 索引、生成 1000 个 shard URL、预检，并始终以
+`--resume auto` 启动 rolling raw 训练。
 
 L4 24GB + 外部 FlashAttention-2 的专用配置是
 `configs/colab_l4_fa2_24gb.yaml`，安装、FA2/SDPA 对照 benchmark 和
@@ -221,14 +228,13 @@ python scripts/inspect_model.py --config configs/cosmos_08b_anime.yaml
 
 ## 22 GB 显存设置
 
-默认配置以以下组合为目标：
+DeepGHS L4 正式配置使用：
 
 - BF16 model 和 activation；
 - T4/V100 使用 FP32 主权重 + FP16 autocast/GradScaler，避免 FP16 参数无法 unscale；
-- PyTorch SDPA；
-- 每层 activation checkpoint；
-- micro-batch 1；
-- gradient accumulation 16；
+- 外部 FlashAttention-2 自注意力，cross-attention 使用 SDPA；
+- 关闭 activation checkpoint，避免 27 层重复前向；
+- 同 ratio microbatch 4、gradient accumulation 4，有效 batch 16；
 - 离线 latent 模式不加载 VAE；rolling raw 模式只在 block 边界换入 Wan encoder；
 - T5Gemma encoder 冻结；
 - 优先使用 8-bit AdamW。
@@ -253,6 +259,8 @@ python scripts/inspect_model.py --config configs/cosmos_08b_anime.yaml
 - bucket 选择和 Danbooru caption 规则；
 - 27 层正式配置的 meta-device 参数精算。
 - rolling raw block、HTTP Range 恢复、原子 checkpoint mirror 和 Colab preflight。
+- 推理张量回归、同源 DeepGHS metadata 匹配、分桶 microbatch 安全游标；
+- Euler/Heun flow sampler 与 CFG。
 
 运行：
 
@@ -265,16 +273,33 @@ pytest
 ```powershell
 python scripts/gpu_smoke.py `
   --config configs/cosmos_08b_anime.yaml `
-  --pixel-size 768x768 `
+  --pixel-size 896x640 `
+  --batch-size 4 `
   --precision float16 `
-  --parameter-precision float32 `
+  --parameter-precision float16 `
   --text-length 192 `
   --sdpa-backend efficient `
-  --gradient-checkpointing `
+  --no-gradient-checkpointing `
   --optimizer adamw8bit
 ```
 
-Tesla V100-SXM2-16GB 实测完整 0.83B 主干：768² 约 1.05 秒/step、峰值 7.94 GiB；1024² 约 1.17 秒/step、峰值 7.97 GiB。该结果包含 backward 与 8-bit optimizer step，不包含 T5/Wan 编码。V100 不适合 FA2/FA3，默认 PyTorch memory-efficient SDPA 即为本项目在该卡上的推荐后端。
+Tesla V100 本机实测完整 0.83B 主干、896×640、microbatch 4、无
+checkpoint、memory-efficient SDPA、8-bit optimizer，在预热后约
+0.408 秒/iteration，峰值 allocated 10.38 GiB、reserved 11.29 GiB。该结果
+包含 forward/backward 与 optimizer step，不包含 T5/Wan 编码。V100 不能
+验证外部 FA2；目标 L4 由 Colab preflight 和 attention benchmark 验证。
+
+训练后可直接从本地或 Drive checkpoint 根目录采样：
+
+```bash
+uv run python scripts/sample.py \
+  --config configs/colab_l4_fa2_deepghs.yaml \
+  --checkpoint /content/drive/MyDrive/cosmos \
+  --prompt "1girl, solo, detailed eyes, best quality" \
+  --width 768 --height 768 \
+  --steps 28 --solver heun --guidance-scale 5 \
+  --output /content/drive/MyDrive/cosmos/sample.png
+```
 
 ## 主要参考
 

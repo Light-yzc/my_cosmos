@@ -48,7 +48,7 @@ def _pin_if_cuda(tensor: Tensor) -> Tensor:
     return tensor.pin_memory() if torch.cuda.is_available() else tensor
 
 
-@torch.inference_mode()
+@torch.no_grad()
 def encode_text_windows(
     batches: Iterable[dict[str, Any]],
     text_encoder: T5GemmaEncoder,

@@ -155,6 +155,8 @@ def collate_latents(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "stream_epoch",
         "source_shard_index",
         "source_sample_index",
+        "resume_shard_index",
+        "resume_sample_index",
     )
     for key in optional_keys:
         if all(key in sample for sample in samples):

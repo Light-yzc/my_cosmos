@@ -28,3 +28,16 @@ def test_l4_fa2_config_uses_durable_drive_mirror() -> None:
         loaded["train"]["checkpoint_mirror_dir"]
         == "/content/drive/MyDrive/cosmos"
     )
+
+
+def test_deepghs_l4_config_uses_homogeneous_microbatch_four() -> None:
+    root = Path(__file__).resolve().parents[1]
+    loaded = load_yaml(root / "configs" / "colab_l4_fa2_deepghs.yaml")
+    assert loaded["data"]["batch_size"] == 4
+    assert loaded["train"]["gradient_accumulation_steps"] == 4
+    assert (
+        loaded["data"]["batch_size"]
+        * loaded["train"]["gradient_accumulation_steps"]
+        == 16
+    )
+    assert loaded["model"]["gradient_checkpointing"] is False

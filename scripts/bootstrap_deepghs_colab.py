@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -138,6 +140,54 @@ def ensure_text_encoder(models: Path) -> None:
     )
 
 
+def training_command(config: str | Path) -> tuple[str, ...]:
+    return (
+        sys.executable,
+        "scripts/train.py",
+        "--config",
+        str(config),
+        "--resume",
+        "auto",
+    )
+
+
+def write_runtime_config(
+    base_config: str | Path,
+    *,
+    drive_root: Path,
+    output: Path,
+    smoke_steps: int | None,
+) -> Path:
+    base = Path(base_config)
+    if not base.is_absolute():
+        base = (ROOT / base).resolve()
+    values: dict[str, object] = {
+        "extends": str(base),
+        "data": {
+            "metadata_index_dir": str(drive_root / "deepghs_metadata"),
+        },
+        "train": {
+            "checkpoint_mirror_dir": str(drive_root),
+        },
+    }
+    if smoke_steps is not None:
+        values["train"] = {
+            "output_dir": "/content/checkpoints_l4_fa2_smoke",
+            "checkpoint_mirror_dir": str(drive_root / "smoke"),
+            "max_steps": smoke_steps,
+            "wandb": {
+                "name": "cosmos-08b-deepghs-l4-smoke",
+                "tags": ["cosmos", "anime", "deepghs", "l4", "fa2", "smoke"],
+            },
+        }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        yaml.safe_dump(values, sort_keys=False),
+        encoding="utf-8",
+    )
+    return output
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Prepare every DeepGHS/Wan/T5 asset and launch L4 training."
@@ -152,6 +202,7 @@ def main() -> None:
         default=Path("/content/drive/MyDrive/cosmos"),
     )
     parser.add_argument("--smoke-shards", type=int)
+    parser.add_argument("--smoke-steps", type=int, default=8)
     parser.add_argument("--prepare-only", action="store_true")
     args = parser.parse_args()
     os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
@@ -160,6 +211,8 @@ def main() -> None:
     )
     if args.smoke_shards is not None and args.smoke_shards < 1:
         raise ValueError("--smoke-shards must be positive")
+    if args.smoke_steps < 1:
+        raise ValueError("--smoke-steps must be positive")
 
     ensure_drive()
     import_colab_secret("HF_TOKEN")
@@ -196,12 +249,29 @@ def main() -> None:
     if args.smoke_shards is not None:
         shard_command.extend(["--limit", str(args.smoke_shards)])
     run(*shard_command)
-    run(sys.executable, "scripts/colab_preflight.py", "--config", args.config)
+    runtime_config = write_runtime_config(
+        args.config,
+        drive_root=args.drive_root,
+        output=Path(
+            "/content/deepghs_runtime_smoke.yaml"
+            if args.smoke_shards is not None
+            else "/content/deepghs_runtime.yaml"
+        ),
+        smoke_steps=(
+            args.smoke_steps if args.smoke_shards is not None else None
+        ),
+    )
+    run(
+        sys.executable,
+        "scripts/colab_preflight.py",
+        "--config",
+        str(runtime_config),
+    )
 
     if args.prepare_only:
         print("all assets are ready; training was not started")
         return
-    run(sys.executable, "scripts/train.py", "--config", args.config)
+    run(*training_command(runtime_config))
 
 
 if __name__ == "__main__":

@@ -9,6 +9,9 @@ data:
   # Generated with list_hf_shards.py --repo deepghs/danbooru2024-webp-4Mpixel
   # --split images. The gated dataset requires HF_TOKEN and accepted access.
   shard_list: /content/deepghs_raw_shards.txt
+  # Four same-ratio latents per DiT forward filled the V100/L4 much more
+  # effectively than microbatch 1 without approaching the L4 memory limit.
+  batch_size: 4
   metadata_index_dir: /content/drive/MyDrive/cosmos/deepghs_metadata
   resolution_stage: "768"
   # Lower time-to-first-step: one 256-latent block instead of waiting for 2048.
@@ -22,11 +25,20 @@ data:
   require_metadata: true
 
 train:
-  # Keep this aligned with rolling_block_size so text caching does not pull a
-  # second VAE block before the first DiT step can begin.
-  text_cache_size: 256
+  # Seven ratio buckets can leave at most 21 samples waiting for a homogeneous
+  # microbatch. 224 guarantees the first text window starts from one 256-image
+  # VAE block instead of pulling a second block before the first DiT step.
+  text_cache_size: 224
   # Log every optimizer step during streaming runs so stalls are visible.
   log_every: 1
+  # microbatch 4 x accumulation 4 keeps the original effective batch 16 while
+  # substantially improving L4 tensor-core utilization.
+  gradient_accumulation_steps: 4
+  # 250 optimizer steps = 4,000 samples at effective batch 16.
+  save_every: 250
+  # Mid-noise timesteps carry more useful learning signal for flow models than
+  # spending equal probability at the nearly-clean/noise-only endpoints.
+  timestep_sampling: logit_normal
   wandb:
     enabled: true
     project: cosmos-anime

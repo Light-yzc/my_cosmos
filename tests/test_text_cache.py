@@ -50,6 +50,8 @@ def test_text_window_batches_encoder_work() -> None:
     assert encoder.moves == 2
     assert encoder.offloads == 2
     assert output[0][1].dtype == torch.float16
+    assert not output[0][1].is_inference()
+    assert not output[0][2].is_inference()
 
 
 def test_cfg_dropout_is_stable_for_stream_cursor() -> None:

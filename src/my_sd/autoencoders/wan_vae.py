@@ -105,7 +105,7 @@ class WanImageVAE:
     def offload_to_cpu(self) -> None:
         self.move_to("cpu", self.config.dtype)
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def encode_images(self, images: Tensor) -> Tensor:
         if images.ndim != 4 or images.shape[1] != 3:
             raise ValueError("images must have shape [B,3,H,W]")
@@ -121,7 +121,7 @@ class WanImageVAE:
             raise RuntimeError(f"Expected one latent frame, got shape {tuple(latents.shape)}")
         return latents.squeeze(2)
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def decode_images(self, latents: Tensor) -> Tensor:
         if self.config.encoder_only:
             raise RuntimeError(

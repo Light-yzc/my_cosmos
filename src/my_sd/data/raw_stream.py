@@ -147,6 +147,29 @@ def iter_raw_tar(
                 file=sys.stderr,
                 flush=True,
             )
+        if external_metadata is not None and grouped:
+            image_ids = {
+                Path(key).name
+                for key, members in grouped.items()
+                if "image" in members
+            }
+            matched = sum(
+                sample_id in external_metadata for sample_id in image_ids
+            )
+            ratio = matched / max(len(image_ids), 1)
+            if progress_label:
+                print(
+                    f"[data] {progress_label}: metadata matched "
+                    f"{matched:,}/{len(image_ids):,} images ({ratio:.1%})",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            if require_metadata and ratio < 0.70:
+                raise RuntimeError(
+                    f"Metadata/image match is only {ratio:.1%} for "
+                    f"{progress_label or path}. Rebuild the same-source DeepGHS "
+                    "index with scripts/prepare_deepghs_metadata.py."
+                )
 
         for key, members in grouped.items():
             if progress_state is not None:
@@ -290,6 +313,7 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
         prefetch_shards: int = 1,
         block_size: int = 2048,
         encode_batch_size: int = 4,
+        train_batch_size: int = 1,
         decode_prefetch: int = 16,
         accumulation_multiple: int = 1,
         max_upscale: float = 1.25,
@@ -309,8 +333,11 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
             raise ValueError("At least one raw tar shard is required")
         if (wan_config is None) == (encoder_factory is None):
             raise ValueError("Provide exactly one of wan_config or encoder_factory")
-        if block_size < 1 or encode_batch_size < 1:
-            raise ValueError("block_size and encode_batch_size must be positive")
+        if block_size < 1 or encode_batch_size < 1 or train_batch_size < 1:
+            raise ValueError(
+                "block_size, encode_batch_size, and train_batch_size "
+                "must be positive"
+            )
         if prefetch_shards != 1:
             raise ValueError(
                 "rolling raw mode requires prefetch_shards=1 to bound disk usage"
@@ -320,6 +347,10 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
         if block_size % accumulation_multiple:
             raise ValueError(
                 "rolling block_size must be divisible by gradient accumulation"
+            )
+        if accumulation_multiple % train_batch_size:
+            raise ValueError(
+                "optimizer sample boundary must be divisible by train_batch_size"
             )
         if max_upscale <= 0:
             raise ValueError("max_upscale must be positive")
@@ -336,6 +367,8 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
         self.block_size = block_size
         self.encode_batch_size = encode_batch_size
         self._effective_encode_batch_size = encode_batch_size
+        self.train_batch_size = train_batch_size
+        self.accumulation_steps = accumulation_multiple // train_batch_size
         self.decode_prefetch = decode_prefetch
         self.accumulation_multiple = accumulation_multiple
         self.max_upscale = max_upscale
@@ -533,7 +566,14 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
         encoder = self._move_encoder_to_compute()
         pending_by_bucket: dict[str, list[PreparedImage]] = {}
         encoded_buffer: list[EncodedImage] = []
+        training_pending: dict[str, list[EncodedImage]] = {}
         global_index = 0
+        trained_cursor = (
+            start_shard,
+            self.resume_sample_index
+            if self.resume_epoch == epoch
+            else -1,
+        )
         encode_started = time.monotonic()
         encoded_since_report = 0
         last_encode_report = encode_started
@@ -575,6 +615,84 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
             block = encoded_buffer[:size]
             del encoded_buffer[:size]
             return block
+
+        def queue_training(items: list[EncodedImage]) -> None:
+            for item in items:
+                training_pending.setdefault(item.bucket, []).append(item)
+
+        def take_training_groups() -> list[list[EncodedImage]]:
+            groups: list[tuple[str, list[EncodedImage]]] = []
+            for bucket_key in sorted(training_pending):
+                values = training_pending[bucket_key]
+                while len(values) >= self.train_batch_size:
+                    groups.append(
+                        (bucket_key, values[: self.train_batch_size])
+                    )
+                    del values[: self.train_batch_size]
+            usable = (
+                len(groups) // self.accumulation_steps
+            ) * self.accumulation_steps
+            for bucket_key, group in reversed(groups[usable:]):
+                training_pending[bucket_key][0:0] = group
+            return [group for _, group in groups[:usable]]
+
+        def untrained_items(
+            groups: list[list[EncodedImage]],
+            next_group: int,
+        ) -> list[EncodedImage]:
+            values = [
+                item
+                for group in groups[next_group:]
+                for item in group
+            ]
+            for pending in training_pending.values():
+                values.extend(pending)
+            return values
+
+        def yield_training(
+            groups: list[list[EncodedImage]],
+        ) -> Iterator[dict[str, Any]]:
+            nonlocal global_index, trained_cursor
+            for group_index, group in enumerate(groups):
+                trained_cursor = max(
+                    trained_cursor,
+                    max(
+                        (
+                            item.source_shard_index,
+                            item.source_sample_index,
+                        )
+                        for item in group
+                    ),
+                )
+                remaining = untrained_items(groups, group_index + 1)
+                if remaining:
+                    earliest = min(
+                        (
+                            item.source_shard_index,
+                            item.source_sample_index,
+                        )
+                        for item in remaining
+                    )
+                    safe_cursor = (earliest[0], earliest[1] - 1)
+                else:
+                    safe_cursor = trained_cursor
+                for encoded in group:
+                    yield {
+                        "latent": encoded.latent,
+                        "caption": self._caption(encoded),
+                        "bucket": encoded.bucket,
+                        "index": global_index,
+                        "sample_id": encoded.sample_id,
+                        "stream_epoch": epoch,
+                        "source_shard_index": encoded.source_shard_index,
+                        "source_sample_index": encoded.source_sample_index,
+                        # Bucket grouping reorders samples. Checkpoint this
+                        # conservative cursor so a restart can duplicate a
+                        # small tail but can never skip an untrained sample.
+                        "resume_shard_index": safe_cursor[0],
+                        "resume_sample_index": safe_cursor[1],
+                    }
+                    global_index += 1
 
         try:
             shard_total = len(sources)
@@ -711,8 +829,14 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
                     flush_all()
                     while len(encoded_buffer) >= self.block_size:
                         block = pop_block(self.block_size)
+                        queue_training(block)
+                        groups = take_training_groups()
+                        if not groups:
+                            continue
                         print(
                             f"[encode] block ready: {len(block):,} latents; "
+                            f"{len(groups):,} homogeneous microbatches x "
+                            f"{self.train_batch_size}; "
                             "offloading Wan VAE and starting DiT consumption",
                             file=sys.stderr,
                             flush=True,
@@ -720,18 +844,7 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
                         self._offload_encoder(encoder)
                         if self._before_train is not None:
                             self._before_train()
-                        for encoded in block:
-                            yield {
-                                "latent": encoded.latent,
-                                "caption": self._caption(encoded),
-                                "bucket": encoded.bucket,
-                                "index": global_index,
-                                "sample_id": encoded.sample_id,
-                                "stream_epoch": epoch,
-                                "source_shard_index": encoded.source_shard_index,
-                                "source_sample_index": encoded.source_sample_index,
-                            }
-                            global_index += 1
+                        yield from yield_training(groups)
                         if self._before_encode is not None:
                             self._before_encode()
                         encoder = self._move_encoder_to_compute()
@@ -750,26 +863,21 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
                 )
 
             flush_all()
-            usable = (
-                len(encoded_buffer) // self.accumulation_multiple
-            ) * self.accumulation_multiple
-            if usable:
-                block = pop_block(usable)
+            queue_training(pop_block(len(encoded_buffer)))
+            groups = take_training_groups()
+            if groups:
                 self._offload_encoder(encoder)
                 if self._before_train is not None:
                     self._before_train()
-                for encoded in block:
-                    yield {
-                        "latent": encoded.latent,
-                        "caption": self._caption(encoded),
-                        "bucket": encoded.bucket,
-                        "index": global_index,
-                        "sample_id": encoded.sample_id,
-                        "stream_epoch": epoch,
-                        "source_shard_index": encoded.source_shard_index,
-                        "source_sample_index": encoded.source_sample_index,
-                    }
-                    global_index += 1
+                yield from yield_training(groups)
+            dropped = sum(len(values) for values in training_pending.values())
+            if dropped:
+                print(
+                    f"[data] epoch tail: dropping {dropped:,} samples that "
+                    "cannot form a homogeneous optimizer boundary",
+                    file=sys.stderr,
+                    flush=True,
+                )
         finally:
             self._offload_encoder(encoder)
             self.resume_epoch = None

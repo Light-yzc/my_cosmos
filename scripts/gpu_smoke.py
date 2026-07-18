@@ -62,6 +62,7 @@ def main() -> int:
         help="Override model.self_attention_backend.",
     )
     parser.add_argument("--text-length", type=int, default=128)
+    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument(
@@ -85,8 +86,10 @@ def main() -> int:
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
-    if args.iterations < 1 or args.warmup < 0:
-        raise ValueError("iterations must be positive and warmup non-negative")
+    if args.iterations < 1 or args.warmup < 0 or args.batch_size < 1:
+        raise ValueError(
+            "iterations/batch-size must be positive and warmup non-negative"
+        )
     raw = load_yaml(args.config)
     values = dict(require_section(raw, "model"))
     if args.depth is not None:
@@ -114,7 +117,7 @@ def main() -> int:
     pixel_height, pixel_width = args.pixel_size
     latent_height, latent_width = pixel_height // 16, pixel_width // 16
     latents = torch.randn(
-        1,
+        args.batch_size,
         config.latent_channels,
         latent_height,
         latent_width,
@@ -122,20 +125,20 @@ def main() -> int:
         dtype=dtype,
     )
     text = torch.randn(
-        1,
+        args.batch_size,
         args.text_length,
         config.text_input_dim,
         device=device,
         dtype=dtype,
     )
     text_mask = torch.ones(
-        1,
+        args.batch_size,
         args.text_length,
         device=device,
         dtype=torch.bool,
     )
     text_mask[:, -max(1, args.text_length // 8) :] = False
-    timesteps = torch.rand(1, device=device)
+    timesteps = torch.rand(args.batch_size, device=device)
     target = torch.randn_like(latents)
     scaler = torch.amp.GradScaler(
         "cuda",
@@ -200,6 +203,7 @@ def main() -> int:
     print(f"torch={torch.__version__} cuda={torch.version.cuda}")
     print(
         f"parameters={parameters:,} depth={config.depth} "
+        f"batch={args.batch_size} "
         f"pixel={pixel_height}x{pixel_width} latent={latent_height}x{latent_width}"
     )
     print(

@@ -10,9 +10,12 @@ from my_sd.data.captions import DanbooruCaptionConfig, DanbooruCaptioner
 from my_sd.data.raw_stream import RollingWanDataset, iter_raw_tar
 
 
-def _image_bytes(color: tuple[int, int, int]) -> bytes:
+def _image_bytes(
+    color: tuple[int, int, int],
+    size: tuple[int, int] = (512, 512),
+) -> bytes:
     buffer = io.BytesIO()
-    Image.new("RGB", (512, 512), color).save(buffer, format="WEBP")
+    Image.new("RGB", size, color).save(buffer, format="WEBP")
     return buffer.getvalue()
 
 
@@ -98,6 +101,29 @@ def test_raw_tar_uses_external_deepghs_metadata(tmp_path) -> None:
     assert samples[0][2]["tag_string_general"] == "1girl blue_hair"
 
 
+def test_raw_tar_rejects_bad_external_metadata_match(tmp_path) -> None:
+    path = tmp_path / "0000.tar"
+    with tarfile.open(path, "w") as archive:
+        for index in range(10):
+            _add_bytes(
+                archive,
+                f"{1000 + index}.webp",
+                _image_bytes((index, 2, 3)),
+            )
+    with pytest.raises(RuntimeError, match="Metadata/image match"):
+        list(
+            iter_raw_tar(
+                path,
+                external_metadata={
+                    "1000": {
+                        "tag_string_general": "1girl",
+                    }
+                },
+                progress_label="0000.tar",
+            )
+        )
+
+
 def test_rolling_dataset_offloads_before_yield_and_drops_partial_accumulation(
     tmp_path,
 ) -> None:
@@ -170,3 +196,45 @@ def test_rolling_dataset_rejects_more_than_one_prefetched_shard(tmp_path) -> Non
             cache_dir=tmp_path / "cache",
             prefetch_shards=2,
         )
+
+
+def test_rolling_dataset_forms_homogeneous_microbatches_with_safe_cursor(
+    tmp_path,
+) -> None:
+    path = tmp_path / "raw.tar"
+    with tarfile.open(path, "w") as archive:
+        for index in range(8):
+            key = f"{2000 + index}"
+            size = (512, 512) if index % 2 == 0 else (448, 576)
+            _add_bytes(
+                archive,
+                f"{key}.webp",
+                _image_bytes((index, 32, 64), size),
+            )
+            _add_bytes(
+                archive,
+                f"{key}.json",
+                json.dumps(
+                    {"rating": "g", "general_tags": ["1girl"]}
+                ).encode(),
+            )
+    dataset = RollingWanDataset(
+        [str(path)],
+        encoder_factory=FakeEncoder,
+        cache_dir=tmp_path / "cache",
+        resolution_stage="512",
+        block_size=8,
+        encode_batch_size=4,
+        train_batch_size=4,
+        accumulation_multiple=8,
+        max_upscale=1.0,
+        shuffle_shards=False,
+        delete_after_use=False,
+    )
+    samples = list(dataset)
+    assert len(samples) == 8
+    for start in range(0, len(samples), 4):
+        assert len({sample["bucket"] for sample in samples[start : start + 4]}) == 1
+    # Reordering never advances the restart cursor past an untrained group.
+    assert samples[0]["resume_sample_index"] <= 0
+    assert samples[-1]["resume_sample_index"] == 7

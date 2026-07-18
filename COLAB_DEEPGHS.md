@@ -1,8 +1,10 @@
 # Colab L4：DeepGHS Danbooru 2024 流式训练
 
 数据源为 `deepghs/danbooru2024-webp-4Mpixel`，约 805 万张图片，
-单图限制为 4MP。图片 tar 与标签元数据分开存放，因此首次使用需要建立
-一次元数据索引；索引存到 Google Drive 后，后续 Colab 会话无需重建。
+单图限制为 4MP。图片 tar 与同仓库的 `metadata.parquet` 分开存放，因此
+首次使用需要建立一次元数据索引；索引存到 Google Drive 后，后续 Colab
+会话无需重建。旧版用其他仓库生成的 17125 分区索引并非严格同源，
+bootstrap 会自动识别并一次性替换为 v2 索引。
 
 ## 1. 环境和权限
 
@@ -31,11 +33,15 @@ os.environ["WANDB_API_KEY"] = userdata.get("WANDB_API_KEY")
 !uv run python scripts/bootstrap_deepghs_colab.py
 ```
 
-第一次建议只跑两个图片 tar：
+第一次建议只跑两个图片 tar。bootstrap 会自动把它限制为 8 optimizer
+step，并使用 `/content/checkpoints_l4_fa2_smoke`、
+`/content/drive/MyDrive/cosmos/smoke` 和独立 W&B run，不会污染正式断点：
 
 ```bash
 !uv run python scripts/bootstrap_deepghs_colab.py --smoke-shards 2
 ```
+
+可用 `--smoke-steps N` 改变 smoke 长度。
 
 只准备所有资源但暂不启动训练：
 
@@ -56,9 +62,10 @@ os.environ["WANDB_API_KEY"] = userdata.get("WANDB_API_KEY")
   --output /content/drive/MyDrive/cosmos/deepghs_metadata
 ```
 
-脚本只扫描完整元数据一次，按 `Danbooru ID % 1000` 生成与
+脚本只扫描 DeepGHS 自带元数据一次，按 `Danbooru ID % 1000` 生成与
 `images/0000.tar` 至 `images/0999.tar` 对应的 1000 个分区。若目标已存在，
-脚本会直接跳过。
+脚本会校验 `_index_manifest.json` 的版本、来源和分区数；只有完全匹配才
+跳过。旧索引会先在 Colab 本地构建完成，再替换 Drive 上的目录。
 
 ## 3. 生成图片 tar 清单
 
@@ -81,7 +88,8 @@ os.environ["WANDB_API_KEY"] = userdata.get("WANDB_API_KEY")
   --config configs/colab_l4_fa2_deepghs.yaml
 
 !uv run python scripts/train.py \
-  --config configs/colab_l4_fa2_deepghs.yaml
+  --config configs/colab_l4_fa2_deepghs.yaml \
+  --resume auto
 ```
 
 训练过程会异步下载下一份图片 tar；当前 tar 在 GPU 上批量做 Wan VAE
@@ -91,13 +99,15 @@ os.environ["WANDB_API_KEY"] = userdata.get("WANDB_API_KEY")
 
 下载日志每约 2 秒输出一次当前文件名、百分比、已下载/总大小、平均速度
 和耗时。断流会显示异常、等待时间和重试次数；已有文件会显示
-`cache hit`。Hugging Face 模型和 35 个元数据 Parquet 使用独立进度条，
+`cache hit`。Hugging Face 模型和 DeepGHS 同源 metadata 使用独立进度条，
 元数据分桶阶段也会显示 DuckDB 扫描进度。
 
 DeepGHS 配置默认每编码 256 张就切换到 DiT 训练，并每约 5 秒显示一次
 Wan VAE 编码速度和 ETA；标签读取、tar 索引扫描及 block 完成也分别输出
-状态。`text_cache_size` 同样设为 256，避免文本缓存为了凑 512 条而提前
-触发第二个 VAE block。
+状态。DiT 按 ratio 组成 microbatch 4，gradient accumulation 为 4，有效
+batch 仍为 16。七个 ratio bucket 最多留下 21 张等待同形状伙伴，因此
+`text_cache_size=224`，保证首个文本窗口不会为了凑数先触发第二个 VAE
+block。
 
 L4 配置还会用一个有界 CPU 线程提前解码 16 张图片，并首先探测 batch 16
 进行 Wan 编码；若 OOM 会自动递归回退并记住 8、4、2、1 中的安全值，
@@ -108,8 +118,10 @@ CUDA 峰值；如果 `input_wait_ratio` 很高，瓶颈仍在数据/编码而不
 
 DeepGHS L4 配置明确关闭全模型 gradient checkpointing，让 768 训练保留
 激活并减少重计算；目标是优先使用 L4 的空闲显存换速度。W&B 默认启用，
-项目名为 `cosmos-anime`，记录 loss、LR、输入等待比例、step 时间、CUDA
-峰值以及 shard/sample 游标。把 `WANDB_API_KEY` 加入 Colab Secrets 即可。
+项目名为 `cosmos-anime`，记录 loss、LR、gradient norm、吞吐、输入等待
+比例、step 时间、CUDA allocated/reserved 峰值以及 shard/sample 游标。
+run ID 保存在 Drive 的 `wandb-run-id.txt`，重启会续到同一个 run。把
+`WANDB_API_KEY` 加入 Colab Secrets 即可。
 
 Rolling 模式在两个 GPU 重负载阶段之间做真正的互斥换入：Wan 编码前将
 DiT 和 optimizer state 卸载到 CPU；256 个 latent 就绪后先把 Wan 卸载，
@@ -122,3 +134,27 @@ Bootstrap 会在加载训练模型前真实下载 `images/0000.json` 来验证 g
 图片权限。若这里返回 403，需要用 `HF_TOKEN` 所属的同一个账号打开
 DeepGHS 数据集页面并接受访问条款；能下载公开的 Danbooru 元数据不能
 证明该账号已经获得 gated 图片权限。
+
+每 250 个 optimizer step 保存一次 checkpoint，即每 4000 个训练样本一次。
+checkpoint 先原子写到 `/content/checkpoints_l4_fa2`，再由后台线程镜像到
+`/content/drive/MyDrive/cosmos`；两侧只保留最近 2 个完整 checkpoint。
+bootstrap 默认带 `--resume auto`，Colab 重连后直接重跑同一条命令即可。
+
+## 5. 从 checkpoint 采样检查效果
+
+采样阶段依次使用 GPU：T5 编码后卸载，DiT 完成 flow ODE 后卸载，最后
+加载 Wan2.2 decoder，因此不要求三个模型同时占显存：
+
+```bash
+!uv run python scripts/sample.py \
+  --config configs/colab_l4_fa2_deepghs.yaml \
+  --checkpoint /content/drive/MyDrive/cosmos \
+  --prompt "1girl, solo, detailed eyes, best quality" \
+  --negative-prompt "low quality, blurry" \
+  --width 768 --height 768 \
+  --steps 28 --solver heun --guidance-scale 5 \
+  --output /content/drive/MyDrive/cosmos/sample.png
+```
+
+宽高必须是 32 的倍数。刚开始从零训练时图片会接近噪声，先观察 loss 是否
+下降，再固定相同 prompt 和 seed 对比不同 checkpoint。

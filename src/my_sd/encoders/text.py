@@ -106,7 +106,7 @@ class T5GemmaEncoder(nn.Module):
         self.encoder.to(device="cpu", dtype=self.compute_dtype)
         self.execution_device = torch.device("cpu")
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def encode(self, prompts: Sequence[str]) -> tuple[Tensor, Tensor]:
         tokens = self.tokenizer(
             list(prompts),

@@ -63,6 +63,20 @@ def seed_everything(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
+def configure_cuda_backends() -> None:
+    """Enable fast, numerically safe CUDA paths across supported PyTorch versions."""
+    try:
+        # PyTorch 2.9+ spelling. TF32 only affects explicit FP32 matmuls; the
+        # L4 recipe primarily computes in BF16.
+        torch.backends.cuda.matmul.fp32_precision = "tf32"
+        torch.backends.cudnn.conv.fp32_precision = "tf32"
+    except (AttributeError, RuntimeError):
+        # Compatibility with the project's PyTorch >=2.5 lower bound.
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
+
+
 def learning_rate_multiplier(
     step: int,
     *,
@@ -234,6 +248,20 @@ def initialize_wandb(
             "W&B online logging is enabled but no login was found. Add "
             "WANDB_API_KEY to Colab Secrets or run `uv run wandb login`."
         )
+    state_root_value = train_config.get(
+        "checkpoint_mirror_dir",
+        train_config.get("output_dir", "checkpoints"),
+    )
+    state_root = Path(str(state_root_value))
+    state_root.mkdir(parents=True, exist_ok=True)
+    run_id_path = state_root / "wandb-run-id.txt"
+    if run_id_path.is_file():
+        run_id = run_id_path.read_text(encoding="utf-8").strip()
+    else:
+        run_id = ""
+    if not run_id:
+        run_id = wandb.util.generate_id()
+        run_id_path.write_text(run_id + "\n", encoding="utf-8")
     run = wandb.init(
         project=str(wandb_config.get("project", "cosmos-anime")),
         entity=wandb_config.get("entity"),
@@ -241,6 +269,7 @@ def initialize_wandb(
         tags=list(wandb_config.get("tags", [])),
         mode=mode,
         config=raw_config,
+        id=run_id,
         resume="allow",
     )
     run.define_metric("train/optimizer_step")
@@ -284,6 +313,7 @@ def main() -> None:
     if wandb_run is not None:
         atexit.register(wandb_run.finish)
     accumulation = int(train_config.get("gradient_accumulation_steps", 1))
+    train_batch_size = int(data_config.get("batch_size", 1))
 
     if not torch.cuda.is_available():
         raise RuntimeError("The full training configuration requires a CUDA GPU")
@@ -291,9 +321,7 @@ def main() -> None:
     dtype, parameter_dtype = training_dtypes(train_config)
     seed = int(train_config.get("seed", 3407))
     seed_everything(seed)
-    torch.backends.cuda.matmul.fp32_precision = "tf32"
-    torch.backends.cudnn.conv.fp32_precision = "tf32"
-    torch.backends.cudnn.benchmark = True
+    configure_cuda_backends()
 
     caption_config = DanbooruCaptionConfig(
         general_tag_dropout=float(data_config.get("general_tag_dropout", 0.10)),
@@ -353,8 +381,8 @@ def main() -> None:
             pin_memory=True,
         )
     elif backend == "rolling_raw":
-        if int(data_config.get("batch_size", 1)) != 1:
-            raise ValueError("rolling_raw currently requires batch_size: 1")
+        if train_batch_size < 1:
+            raise ValueError("rolling_raw data.batch_size must be positive")
         if int(train_config.get("text_cache_size", 0)) < 1:
             raise ValueError(
                 "rolling_raw requires text_cache_size > 0 so T5 can be offloaded "
@@ -380,8 +408,9 @@ def main() -> None:
             prefetch_shards=int(data_config.get("prefetch_shards", 1)),
             block_size=int(data_config.get("rolling_block_size", 2048)),
             encode_batch_size=int(data_config.get("encode_batch_size", 4)),
+            train_batch_size=train_batch_size,
             decode_prefetch=int(data_config.get("decode_prefetch", 16)),
-            accumulation_multiple=accumulation,
+            accumulation_multiple=accumulation * train_batch_size,
             max_upscale=float(data_config.get("max_upscale", 1.25)),
             allowed_ratings=ratings,
             require_metadata=bool(
@@ -395,7 +424,7 @@ def main() -> None:
         sampler = None
         loader = DataLoader(
             dataset,
-            batch_size=1,
+            batch_size=train_batch_size,
             collate_fn=collate_latents,
             num_workers=0,
             pin_memory=True,
@@ -512,13 +541,21 @@ def main() -> None:
     )
     print(f"self-attention backend: {model_config.self_attention_backend}")
     sample_count = f"{len(dataset):,}" if hasattr(dataset, "__len__") else "streaming"
-    print(f"samples: {sample_count}; gradient accumulation: {accumulation}")
+    print(
+        f"samples: {sample_count}; microbatch: {train_batch_size}; "
+        f"gradient accumulation: {accumulation}; effective batch: "
+        f"{train_batch_size * accumulation}"
+    )
 
     optimizer.zero_grad(set_to_none=True)
+    initial_step = step
     started = time.perf_counter()
     last_batch_finished = started
     last_optimizer_finished = started
     input_wait_window = 0.0
+    loss_sum_window = torch.zeros((), device=device, dtype=torch.float32)
+    loss_count_window = 0
+    last_grad_norm = 0.0
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
     while step < max_steps:
@@ -565,14 +602,28 @@ def main() -> None:
             if "source_shard_index" in batch:
                 last_data_cursor = {
                     "epoch": int(batch["stream_epoch"][0]),
-                    "shard_index": int(batch["source_shard_index"][0]),
-                    "sample_index": int(batch["source_sample_index"][0]),
+                    "shard_index": int(
+                        batch.get(
+                            "resume_shard_index",
+                            batch["source_shard_index"],
+                        )[0]
+                    ),
+                    "sample_index": int(
+                        batch.get(
+                            "resume_sample_index",
+                            batch["source_sample_index"],
+                        )[0]
+                    ),
                 }
             clean = batch["latents"].to(
                 device=device, dtype=dtype, non_blocking=True
-            )
-            text_states = text_states.to(device=device, dtype=dtype, non_blocking=True)
-            text_mask = text_mask.to(device=device, non_blocking=True)
+            ).clone()
+            text_states = text_states.to(
+                device=device, dtype=dtype, non_blocking=True
+            ).clone()
+            text_mask = text_mask.to(
+                device=device, non_blocking=True
+            ).clone()
             flow = make_flow_matching_batch(
                 clean,
                 timestep_sampling=str(
@@ -594,15 +645,18 @@ def main() -> None:
                 loss = flow_matching_loss(prediction, flow.target_velocity)
                 scaled_loss = loss / accumulation
             scaler.scale(scaled_loss).backward()
+            loss_sum_window.add_(loss.detach().float())
+            loss_count_window += 1
             micro_step += 1
             if micro_step % accumulation:
                 last_batch_finished = time.perf_counter()
                 continue
 
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(
+            grad_norm = torch.nn.utils.clip_grad_norm_(
                 model.parameters(), float(train_config.get("max_grad_norm", 1.0))
             )
+            last_grad_norm = float(grad_norm.detach().float().item())
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
@@ -614,12 +668,29 @@ def main() -> None:
                     torch.cuda.synchronize()
                 now = time.perf_counter()
                 elapsed = time.perf_counter() - started
+                runtime_steps = max(step - initial_step, 1)
                 step_wall = max(now - last_optimizer_finished, 1e-6)
                 input_fraction = min(input_wait_window / step_wall, 1.0)
+                mean_loss = float(
+                    (loss_sum_window / max(loss_count_window, 1)).item()
+                )
                 peak_gib = (
                     torch.cuda.max_memory_allocated() / 1024**3
                     if torch.cuda.is_available()
                     else 0.0
+                )
+                reserved_gib = (
+                    torch.cuda.memory_reserved() / 1024**3
+                    if torch.cuda.is_available()
+                    else 0.0
+                )
+                peak_reserved_gib = (
+                    torch.cuda.max_memory_reserved() / 1024**3
+                    if torch.cuda.is_available()
+                    else 0.0
+                )
+                samples_per_second = (
+                    accumulation * train_batch_size / step_wall
                 )
                 cursor_text = ""
                 if last_data_cursor is not None:
@@ -628,13 +699,16 @@ def main() -> None:
                         f"sample={last_data_cursor['sample_index']}"
                     )
                 print(
-                    f"step={step} loss={loss.item():.5f} "
+                    f"step={step} loss={mean_loss:.5f} "
+                    f"grad_norm={last_grad_norm:.3f} "
                     f"lr={scheduler.get_last_lr()[0]:.3e} "
-                    f"seconds/step={elapsed / step:.2f} "
+                    f"seconds/step={elapsed / runtime_steps:.2f} "
                     f"last_step={step_wall:.2f}s "
+                    f"samples/s={samples_per_second:.2f} "
                     f"input_wait={input_wait_window:.2f}s "
                     f"input_wait_ratio={input_fraction:.1%} "
-                    f"cuda_peak={peak_gib:.1f}GiB"
+                    f"cuda={peak_gib:.1f}GiB_peak/"
+                    f"{reserved_gib:.1f}GiB_reserved"
                     f"{cursor_text}",
                     flush=True,
                 )
@@ -642,15 +716,21 @@ def main() -> None:
                     metrics: dict[str, float | int] = {
                         "train/optimizer_step": step,
                         "train/micro_step": micro_step,
-                        "train/loss": float(loss.item()),
+                        "train/loss": mean_loss,
+                        "train/gradient_norm": last_grad_norm,
                         "train/learning_rate": float(
                             scheduler.get_last_lr()[0]
                         ),
-                        "performance/seconds_per_step_average": elapsed / step,
+                        "performance/seconds_per_step_average": (
+                            elapsed / runtime_steps
+                        ),
                         "performance/log_window_seconds": step_wall,
+                        "performance/samples_per_second": samples_per_second,
                         "performance/input_wait_seconds": input_wait_window,
                         "performance/input_wait_ratio": input_fraction,
                         "system/cuda_peak_allocated_gib": peak_gib,
+                        "system/cuda_reserved_gib": reserved_gib,
+                        "system/cuda_peak_reserved_gib": peak_reserved_gib,
                     }
                     if last_data_cursor is not None:
                         metrics.update(
@@ -669,6 +749,8 @@ def main() -> None:
                     torch.cuda.reset_peak_memory_stats()
                 last_optimizer_finished = now
                 input_wait_window = 0.0
+                loss_sum_window.zero_()
+                loss_count_window = 0
             if step % int(train_config.get("save_every", 5000)) == 0:
                 save_checkpoint(
                     model,
