@@ -167,7 +167,9 @@ L4 24GB + 外部 FlashAttention-2 的专用配置是
 `configs/colab_l4_fa2_24gb.yaml`，安装、FA2/SDPA 对照 benchmark 和
 Drive 恢复说明见 [`docs/L4_FA2.md`](docs/L4_FA2.md)。该配置将本地
 checkpoint 原子写入 `/content/checkpoints_l4_fa2`，再后台镜像到
-`/content/drive/MyDrive/cosmos`。
+`/content/drive/MyDrive/cosmos`。Linux L4 环境固定使用 PyTorch
+2.9.0 + CUDA 12.8 与 FlashAttention 2.8.3，避免 uv 自动升级到
+CUDA 13 PyTorch 后与 Colab 的 CUDA 12.8 toolkit 发生编译冲突。
 
 默认 notebook 是隔离的单 shard smoke run，只训练 8 个 optimizer step。验证通过后再将 `SMOKE_RUN=False`、`SHARD_LIMIT=None` 并切换到正式数据集。不要在同一个正式 checkpoint 任务中途改变 shard list。
 

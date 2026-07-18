@@ -15,6 +15,20 @@ uv sync --extra train --extra test
 MAX_JOBS=4 uv sync --extra train --extra test --extra fa2
 ```
 
+项目在 Linux 上固定使用 PyTorch 2.9.0 + CUDA 12.8，并固定
+FlashAttention 2.8.3。这个组合与当前 Colab 的 CUDA 12.8 toolkit
+一致，并有 CPython 3.12 / Linux x86_64 的官方 FA2 wheel。不要使用
+`--torch-backend=auto`，否则 uv 可能选择比本机 `nvcc` 更新的 CUDA
+13 PyTorch，导致 FA2 回退源码编译后报 CUDA mismatch。
+
+如果之前已经执行过 `uv init` / `uv sync` 并装出了
+`torch 2.13+cu130`，更新项目后执行：
+
+```bash
+uv lock --upgrade-package torch --upgrade-package flash-attn
+MAX_JOBS=4 uv sync --extra train --extra test --extra fa2 --reinstall-package flash-attn
+```
+
 如果 `flash-attn` 报找不到 `CUDA_HOME` 或 `nvcc`，说明环境只有 CUDA
 runtime，没有开发工具链。优先使用匹配当前 PyTorch/CUDA/Python ABI 的
 预编译 wheel；否则换到带 CUDA toolkit 的 NVIDIA PyTorch `devel`
