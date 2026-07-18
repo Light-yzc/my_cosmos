@@ -6,5 +6,12 @@ data:
   shard_list: /content/deepghs_raw_shards.txt
   metadata_index_dir: /content/drive/MyDrive/cosmos/deepghs_metadata
   resolution_stage: "768"
+  # Lower time-to-first-step: one 256-latent block instead of waiting for 2048.
+  rolling_block_size: 256
   max_upscale: 1.10
   require_metadata: true
+
+train:
+  # Keep this aligned with rolling_block_size so text caching does not pull a
+  # second VAE block before the first DiT step can begin.
+  text_cache_size: 256

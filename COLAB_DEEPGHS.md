@@ -93,6 +93,11 @@ os.environ["HF_TOKEN"] = userdata.get("HF_TOKEN")
 `cache hit`。Hugging Face 模型和 35 个元数据 Parquet 使用独立进度条，
 元数据分桶阶段也会显示 DuckDB 扫描进度。
 
+DeepGHS 配置默认每编码 256 张就切换到 DiT 训练，并每约 5 秒显示一次
+Wan VAE 编码速度和 ETA；标签读取、tar 索引扫描及 block 完成也分别输出
+状态。`text_cache_size` 同样设为 256，避免文本缓存为了凑 512 条而提前
+触发第二个 VAE block。
+
 Bootstrap 会在加载训练模型前真实下载 `images/0000.json` 来验证 gated
 图片权限。若这里返回 403，需要用 `HF_TOKEN` 所属的同一个账号打开
 DeepGHS 数据集页面并接受访问条款；能下载公开的 Danbooru 元数据不能

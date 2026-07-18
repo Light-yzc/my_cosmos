@@ -3,7 +3,9 @@ from __future__ import annotations
 import io
 import json
 import random
+import sys
 import tarfile
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
@@ -104,6 +106,7 @@ def iter_raw_tar(
     *,
     require_metadata: bool = True,
     external_metadata: Mapping[str, Mapping[str, object]] | None = None,
+    progress_label: str | None = None,
 ) -> Iterator[tuple[str, Image.Image, dict[str, Any]]]:
     """
     Reads WebDataset-style image + JSON/TXT samples.
@@ -113,6 +116,13 @@ def iter_raw_tar(
     sidecars to appear before or after their image. It must not be used on one
     monolithic multi-million-member tar.
     """
+    scan_started = time.monotonic()
+    if progress_label:
+        print(
+            f"[data] {progress_label}: scanning tar index...",
+            file=sys.stderr,
+            flush=True,
+        )
     with tarfile.open(path, mode="r:*") as archive:
         grouped: dict[str, dict[str, tarfile.TarInfo]] = {}
         for member in archive.getmembers():
@@ -123,6 +133,13 @@ def iter_raw_tar(
                 continue
             key, kind = parsed
             grouped.setdefault(key, {})[kind] = member
+        if progress_label:
+            print(
+                f"[data] {progress_label}: indexed {len(grouped):,} members "
+                f"in {time.monotonic() - scan_started:.1f}s; decoding images...",
+                file=sys.stderr,
+                flush=True,
+            )
 
         for key, members in grouped.items():
             image_member = members.get("image")
@@ -398,13 +415,32 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
         pending_by_bucket: dict[str, list[PreparedImage]] = {}
         encoded_buffer: list[EncodedImage] = []
         global_index = 0
+        encode_started = time.monotonic()
+        encoded_since_report = 0
+        last_encode_report = encode_started
 
         def flush_bucket(bucket_key: str) -> None:
+            nonlocal encoded_since_report, last_encode_report
             items = pending_by_bucket.get(bucket_key, [])
             if not items:
                 return
             pending_by_bucket[bucket_key] = []
             encoded_buffer.extend(self._encode_batch(encoder, items))
+            encoded_since_report += len(items)
+            now = time.monotonic()
+            if now - last_encode_report >= 5.0:
+                elapsed = max(now - encode_started, 1e-6)
+                speed = encoded_since_report / elapsed
+                target = self.block_size
+                remaining = max(target - len(encoded_buffer), 0)
+                eta = remaining / speed if speed > 0 else float("inf")
+                print(
+                    f"[encode] {len(encoded_buffer):,}/{target:,} latent "
+                    f"| {speed:.2f} image/s | ETA {eta:.0f}s",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                last_encode_report = now
 
         def flush_all() -> None:
             for bucket_key in list(pending_by_bucket):
@@ -425,15 +461,28 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
             for shard_offset, shard_path in enumerate(prefetcher):
                 shard_index = start_shard + shard_offset
                 source = sources[shard_offset]
-                external_metadata = (
-                    self.metadata_index.load_for_source(source)
-                    if self.metadata_index is not None
-                    else None
-                )
+                label = Path(str(source).replace("\\", "/")).name
+                external_metadata = None
+                if self.metadata_index is not None:
+                    metadata_started = time.monotonic()
+                    print(
+                        f"[data] {label}: loading metadata partition...",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    external_metadata = self.metadata_index.load_for_source(source)
+                    print(
+                        f"[data] {label}: loaded "
+                        f"{len(external_metadata):,} metadata rows in "
+                        f"{time.monotonic() - metadata_started:.1f}s",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 raw_samples = iter_raw_tar(
                     shard_path,
                     require_metadata=self.require_metadata,
                     external_metadata=external_metadata,
+                    progress_label=label,
                 )
                 for sample_index, (key, image, metadata) in enumerate(raw_samples):
                     if (
@@ -493,6 +542,12 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
                     flush_all()
                     while len(encoded_buffer) >= self.block_size:
                         block = pop_block(self.block_size)
+                        print(
+                            f"[encode] block ready: {len(block):,} latents; "
+                            "offloading Wan VAE and starting DiT consumption",
+                            file=sys.stderr,
+                            flush=True,
+                        )
                         self._offload_encoder(encoder)
                         for encoded in block:
                             yield {
@@ -507,6 +562,9 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
                             }
                             global_index += 1
                         encoder = self._move_encoder_to_compute()
+                        encode_started = time.monotonic()
+                        encoded_since_report = 0
+                        last_encode_report = encode_started
 
             flush_all()
             usable = (
