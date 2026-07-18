@@ -1,5 +1,10 @@
 extends: colab_l4_fa2_24gb.yaml
 
+model:
+  # L4 has enough memory for 768 microbatch 1. Keep activations to avoid the
+  # expensive full-model recomputation caused by gradient checkpointing.
+  gradient_checkpointing: false
+
 data:
   # Generated with list_hf_shards.py --repo deepghs/danbooru2024-webp-4Mpixel
   # --split images. The gated dataset requires HF_TOKEN and accepted access.
@@ -22,3 +27,8 @@ train:
   text_cache_size: 256
   # Log every optimizer step during streaming runs so stalls are visible.
   log_every: 1
+  wandb:
+    enabled: true
+    project: cosmos-anime
+    name: cosmos-08b-deepghs-l4
+    tags: [cosmos, anime, deepghs, l4, fa2]

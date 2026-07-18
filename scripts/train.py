@@ -210,6 +210,44 @@ def apply_runtime_overrides(
         train_config["checkpoint_mirror_dir"] = args.checkpoint_mirror_dir
 
 
+def initialize_wandb(
+    raw_config: dict[str, Any],
+    train_config: dict[str, Any],
+) -> Any | None:
+    wandb_config = train_config.get("wandb", {})
+    if not isinstance(wandb_config, dict):
+        raise TypeError("train.wandb must be a mapping")
+    if not bool(wandb_config.get("enabled", False)):
+        return None
+    try:
+        import wandb
+    except ImportError as error:
+        raise RuntimeError(
+            "W&B logging is enabled; run `uv sync --extra train --extra fa2`"
+        ) from error
+    mode = str(wandb_config.get("mode", "online"))
+    if mode == "online" and not (
+        os.environ.get("WANDB_API_KEY")
+        or Path.home().joinpath(".netrc").is_file()
+    ):
+        raise RuntimeError(
+            "W&B online logging is enabled but no login was found. Add "
+            "WANDB_API_KEY to Colab Secrets or run `uv run wandb login`."
+        )
+    run = wandb.init(
+        project=str(wandb_config.get("project", "cosmos-anime")),
+        entity=wandb_config.get("entity"),
+        name=wandb_config.get("name"),
+        tags=list(wandb_config.get("tags", [])),
+        mode=mode,
+        config=raw_config,
+        resume="allow",
+    )
+    run.define_metric("train/optimizer_step")
+    run.define_metric("*", step_metric="train/optimizer_step")
+    return run
+
+
 def main() -> None:
     args = create_argument_parser().parse_args()
     raw = load_yaml(args.config)
@@ -218,6 +256,9 @@ def main() -> None:
     data_config = require_section(raw, "data")
     train_config = require_section(raw, "train")
     apply_runtime_overrides(args, data_config, train_config)
+    wandb_run = initialize_wandb(raw, train_config)
+    if wandb_run is not None:
+        atexit.register(wandb_run.finish)
     accumulation = int(train_config.get("gradient_accumulation_steps", 1))
 
     if not torch.cuda.is_available():
@@ -537,6 +578,33 @@ def main() -> None:
                     f"{cursor_text}",
                     flush=True,
                 )
+                if wandb_run is not None:
+                    metrics: dict[str, float | int] = {
+                        "train/optimizer_step": step,
+                        "train/micro_step": micro_step,
+                        "train/loss": float(loss.item()),
+                        "train/learning_rate": float(
+                            scheduler.get_last_lr()[0]
+                        ),
+                        "performance/seconds_per_step_average": elapsed / step,
+                        "performance/log_window_seconds": step_wall,
+                        "performance/input_wait_seconds": input_wait_window,
+                        "performance/input_wait_ratio": input_fraction,
+                        "system/cuda_peak_allocated_gib": peak_gib,
+                    }
+                    if last_data_cursor is not None:
+                        metrics.update(
+                            {
+                                "data/epoch": last_data_cursor["epoch"],
+                                "data/shard_index": last_data_cursor[
+                                    "shard_index"
+                                ],
+                                "data/sample_index": last_data_cursor[
+                                    "sample_index"
+                                ],
+                            }
+                        )
+                    wandb_run.log(metrics, step=step)
                 if torch.cuda.is_available():
                     torch.cuda.reset_peak_memory_stats()
                 last_optimizer_finished = now
@@ -581,6 +649,9 @@ def main() -> None:
     )
     if mirror is not None:
         mirror.close()
+    if wandb_run is not None:
+        wandb_run.finish()
+        atexit.unregister(wandb_run.finish)
 
 
 if __name__ == "__main__":

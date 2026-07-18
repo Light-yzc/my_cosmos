@@ -54,6 +54,9 @@ def test_preflight_accepts_complete_rolling_configuration(tmp_path) -> None:
     )
     assert report.ok, report.errors
     assert any(check.name == "rolling block" for check in report.checks)
+    assert any(
+        check.name == "gradient checkpointing" for check in report.checks
+    )
 
 
 def test_preflight_rejects_block_outside_optimizer_boundary(tmp_path) -> None:

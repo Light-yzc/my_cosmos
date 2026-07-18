@@ -88,6 +88,17 @@ def run_colab_preflight(
                 PreflightCheck("ok", "FlashAttention-2", "external flash_attn")
             )
 
+    checkpointing = bool(model.get("gradient_checkpointing", True))
+    checks.append(
+        PreflightCheck(
+            "warning" if checkpointing else "ok",
+            "gradient checkpointing",
+            "enabled (lower VRAM, extra recomputation)"
+            if checkpointing
+            else "disabled (activations retained for higher throughput)",
+        )
+    )
+
     backend = str(data.get("backend", "manifest"))
     checks.append(PreflightCheck("ok", "backend", backend))
     if backend not in {"rolling_raw", "streaming_tar"}:
@@ -100,6 +111,18 @@ def run_colab_preflight(
         )
 
     accumulation = int(train.get("gradient_accumulation_steps", 1))
+    wandb_config = train.get("wandb", {})
+    if isinstance(wandb_config, dict) and wandb_config.get("enabled", False):
+        if os.environ.get("WANDB_API_KEY") or Path.home().joinpath(".netrc").is_file():
+            checks.append(PreflightCheck("ok", "W&B", "online logging configured"))
+        else:
+            checks.append(
+                PreflightCheck(
+                    "warning",
+                    "W&B",
+                    "WANDB_API_KEY is unset and no cached login was found",
+                )
+            )
     if accumulation < 1:
         checks.append(
             PreflightCheck("error", "gradient accumulation", "must be positive")

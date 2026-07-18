@@ -27,6 +27,7 @@ dependencies = [
 train = [
   "bitsandbytes>=0.45; platform_system != 'Windows'",
   "tensorboard>=2.18",
+  "wandb>=0.19",
 ]
 fa2 = [
   "flash-attn==2.8.3; platform_system == 'Linux'",

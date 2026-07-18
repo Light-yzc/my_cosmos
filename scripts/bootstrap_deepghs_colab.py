@@ -49,6 +49,19 @@ def ensure_token() -> str:
     return token
 
 
+def import_colab_secret(name: str) -> None:
+    if os.environ.get(name):
+        return
+    try:
+        from google.colab import userdata
+
+        value = userdata.get(name)
+    except Exception:
+        return
+    if value:
+        os.environ[name] = value
+
+
 def verify_deepghs_access(token: str) -> None:
     from huggingface_hub import hf_hub_download
     from huggingface_hub.errors import HfHubHTTPError
@@ -145,6 +158,8 @@ def main() -> None:
         raise ValueError("--smoke-shards must be positive")
 
     ensure_drive()
+    import_colab_secret("HF_TOKEN")
+    import_colab_secret("WANDB_API_KEY")
     token = ensure_token()
     verify_deepghs_access(token)
     models = Path("/content/models")

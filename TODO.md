@@ -263,6 +263,8 @@ Hugging Face tar shard
   OOM 二分回退并记忆安全 batch、
   pinned non-blocking H2D、逐 shard 图片总进度、VAE/T5 进度，以及每个
   optimizer step 的输入等待比例和 CUDA 峰值日志。
+- DeepGHS L4 正式配置已关闭全模型 gradient checkpointing，并接入 W&B
+  在线指标（loss/LR/吞吐/输入等待/CUDA 峰值/数据游标）。
 - https://huggingface.co/datasets/deepghs/danbooru2024-webp-4Mpixel
 - https://huggingface.co/datasets/p1atdev/danbooru-2024
 - https://github.com/deepghs/cheesechaser
