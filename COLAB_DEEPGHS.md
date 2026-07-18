@@ -98,6 +98,13 @@ Wan VAE 编码速度和 ETA；标签读取、tar 索引扫描及 block 完成也
 状态。`text_cache_size` 同样设为 256，避免文本缓存为了凑 512 条而提前
 触发第二个 VAE block。
 
+L4 配置还会用一个有界 CPU 线程提前解码 16 张图片，并首先探测 batch 16
+进行 Wan 编码；若 OOM 会自动递归回退并记住 8、4、2、1 中的安全值，
+后续 batch 不会反复触发相同 OOM。数据日志按 tar 显示
+`当前 shard/总 shard`、`已扫描/总图片`、通过数、各类跳过数、图片速度、
+ETA 和 CUDA reserved。训练每个 optimizer step 都显示输入等待占比和
+CUDA 峰值；如果 `input_wait_ratio` 很高，瓶颈仍在数据/编码而不是 DiT。
+
 Bootstrap 会在加载训练模型前真实下载 `images/0000.json` 来验证 gated
 图片权限。若这里返回 403，需要用 `HF_TOKEN` 所属的同一个账号打开
 DeepGHS 数据集页面并接受访问条款；能下载公开的 Danbooru 元数据不能

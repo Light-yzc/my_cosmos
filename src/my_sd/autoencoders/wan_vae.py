@@ -111,7 +111,9 @@ class WanImageVAE:
             raise ValueError("images must have shape [B,3,H,W]")
         if images.shape[-2] % 16 or images.shape[-1] % 16:
             raise ValueError("Wan images must have height and width divisible by 16")
-        videos = images.to(self.config.device).unsqueeze(2)
+        videos = images.to(
+            self.config.device, non_blocking=True
+        ).unsqueeze(2)
         device_type = torch.device(self.config.device).type
         with torch.autocast(device_type=device_type, dtype=_dtype(self.config.dtype)):
             latents = self.vae.model.encode(videos, self.vae.scale).float()

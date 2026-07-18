@@ -5,7 +5,9 @@ import json
 import random
 import sys
 import tarfile
+import threading
 import time
+from queue import Empty, Full, Queue
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
@@ -107,6 +109,7 @@ def iter_raw_tar(
     require_metadata: bool = True,
     external_metadata: Mapping[str, Mapping[str, object]] | None = None,
     progress_label: str | None = None,
+    progress_state: dict[str, int] | None = None,
 ) -> Iterator[tuple[str, Image.Image, dict[str, Any]]]:
     """
     Reads WebDataset-style image + JSON/TXT samples.
@@ -133,6 +136,10 @@ def iter_raw_tar(
                 continue
             key, kind = parsed
             grouped.setdefault(key, {})[kind] = member
+        if progress_state is not None:
+            progress_state["total"] = len(grouped)
+            progress_state["scanned"] = 0
+            progress_state["decoded"] = 0
         if progress_label:
             print(
                 f"[data] {progress_label}: indexed {len(grouped):,} members "
@@ -142,6 +149,8 @@ def iter_raw_tar(
             )
 
         for key, members in grouped.items():
+            if progress_state is not None:
+                progress_state["scanned"] += 1
             image_member = members.get("image")
             if image_member is None:
                 continue
@@ -170,7 +179,65 @@ def iter_raw_tar(
                 continue
             with Image.open(io.BytesIO(image_file.read())) as opened:
                 image = opened.convert("RGB")
+            if progress_state is not None:
+                progress_state["decoded"] += 1
             yield key, image, metadata
+
+
+def _threaded_prefetch(
+    iterable: Iterator[tuple[str, Image.Image, dict[str, Any]]],
+    *,
+    capacity: int,
+) -> Iterator[tuple[str, Image.Image, dict[str, Any]]]:
+    """Decode upcoming tar images on CPU while the main thread runs the VAE."""
+    if capacity < 1:
+        yield from iterable
+        return
+    queue: Queue[object] = Queue(maxsize=capacity)
+    sentinel = object()
+    stopped = threading.Event()
+
+    def put(value: object) -> bool:
+        while not stopped.is_set():
+            try:
+                queue.put(value, timeout=0.2)
+                return True
+            except Full:
+                continue
+        return False
+
+    def produce() -> None:
+        try:
+            for value in iterable:
+                if not put(value):
+                    return
+        except BaseException as error:
+            put(error)
+        finally:
+            put(sentinel)
+
+    thread = threading.Thread(
+        target=produce,
+        name="raw-image-prefetch",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        while True:
+            try:
+                value = queue.get(timeout=0.5)
+            except Empty:
+                if not thread.is_alive():
+                    return
+                continue
+            if value is sentinel:
+                return
+            if isinstance(value, BaseException):
+                raise value
+            yield value  # type: ignore[misc]
+    finally:
+        stopped.set()
+        thread.join(timeout=2)
 
 
 def prepare_image(
@@ -223,6 +290,7 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
         prefetch_shards: int = 1,
         block_size: int = 2048,
         encode_batch_size: int = 4,
+        decode_prefetch: int = 16,
         accumulation_multiple: int = 1,
         max_upscale: float = 1.25,
         allowed_ratings: Sequence[str] | None = None,
@@ -255,6 +323,8 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
             )
         if max_upscale <= 0:
             raise ValueError("max_upscale must be positive")
+        if decode_prefetch < 0:
+            raise ValueError("decode_prefetch cannot be negative")
 
         self.shard_sources = list(shard_sources)
         self.wan_config = wan_config
@@ -265,6 +335,8 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
         self.prefetch_shards = prefetch_shards
         self.block_size = block_size
         self.encode_batch_size = encode_batch_size
+        self._effective_encode_batch_size = encode_batch_size
+        self.decode_prefetch = decode_prefetch
         self.accumulation_multiple = accumulation_multiple
         self.max_upscale = max_upscale
         self.allowed_ratings = (
@@ -339,19 +411,42 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
     ) -> list[EncodedImage]:
         if not items:
             return []
+        if len(items) > self._effective_encode_batch_size:
+            encoded: list[EncodedImage] = []
+            for start in range(0, len(items), self._effective_encode_batch_size):
+                encoded.extend(
+                    self._encode_batch(
+                        encoder,
+                        items[start : start + self._effective_encode_batch_size],
+                    )
+                )
+            return encoded
         pixels = torch.stack([item.pixels for item in items])
+        if torch.cuda.is_available():
+            pixels = pixels.pin_memory()
         try:
             latents = encoder.encode_images(pixels)
         except torch.OutOfMemoryError:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            latents = torch.cat(
-                [
-                    encoder.encode_images(item.pixels.unsqueeze(0))
-                    for item in items
-                ],
-                dim=0,
+            if len(items) == 1:
+                raise
+            midpoint = len(items) // 2
+            self._effective_encode_batch_size = min(
+                self._effective_encode_batch_size,
+                midpoint,
             )
+            print(
+                f"[encode] OOM at batch={len(items)}; retrying as "
+                f"{midpoint}+{len(items) - midpoint}; future batches use "
+                f"{self._effective_encode_batch_size}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return [
+                *self._encode_batch(encoder, items[:midpoint]),
+                *self._encode_batch(encoder, items[midpoint:]),
+            ]
         if len(latents) != len(items):
             raise RuntimeError(
                 f"Wan encoder returned {len(latents)} latents for {len(items)} images"
@@ -458,10 +553,16 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
             return block
 
         try:
+            shard_total = len(sources)
             for shard_offset, shard_path in enumerate(prefetcher):
                 shard_index = start_shard + shard_offset
                 source = sources[shard_offset]
                 label = Path(str(source).replace("\\", "/")).name
+                print(
+                    f"[shard] {shard_offset + 1:,}/{shard_total:,}: {label}",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 external_metadata = None
                 if self.metadata_index is not None:
                     metadata_started = time.monotonic()
@@ -478,12 +579,23 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
                         file=sys.stderr,
                         flush=True,
                     )
-                raw_samples = iter_raw_tar(
-                    shard_path,
-                    require_metadata=self.require_metadata,
-                    external_metadata=external_metadata,
-                    progress_label=label,
+                raw_progress: dict[str, int] = {}
+                raw_samples = _threaded_prefetch(
+                    iter_raw_tar(
+                        shard_path,
+                        require_metadata=self.require_metadata,
+                        external_metadata=external_metadata,
+                        progress_label=label,
+                        progress_state=raw_progress,
+                    ),
+                    capacity=self.decode_prefetch,
                 )
+                shard_started = time.monotonic()
+                accepted = 0
+                skipped_rating = 0
+                skipped_upscale = 0
+                skipped_invalid = 0
+                last_data_report = shard_started
                 for sample_index, (key, image, metadata) in enumerate(raw_samples):
                     if (
                         self.resume_epoch == epoch
@@ -494,6 +606,7 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
                     if self.allowed_ratings is not None:
                         rating = _normalized_rating(metadata.get("rating"))
                         if rating not in self.allowed_ratings:
+                            skipped_rating += 1
                             continue
                     try:
                         bucket = choose_bucket(
@@ -504,11 +617,14 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
                             bucket.height / image.height,
                         )
                         if required_scale > self.max_upscale:
+                            skipped_upscale += 1
                             continue
                         original_size = (image.width, image.height)
                         pixels, crop_box = prepare_image(image, bucket)
                     except (OSError, ValueError):
+                        skipped_invalid += 1
                         continue
+                    accepted += 1
 
                     record = dict(metadata)
                     record.update(
@@ -531,8 +647,37 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
                     )
                     bucket_items = pending_by_bucket.setdefault(bucket.key, [])
                     bucket_items.append(item)
-                    if len(bucket_items) >= self.encode_batch_size:
+                    if len(bucket_items) >= self._effective_encode_batch_size:
                         flush_bucket(bucket.key)
+
+                    now = time.monotonic()
+                    if now - last_data_report >= 5.0:
+                        scanned = raw_progress.get("scanned", sample_index + 1)
+                        total = raw_progress.get("total", 0)
+                        elapsed = max(now - shard_started, 1e-6)
+                        rate = scanned / elapsed
+                        eta = (
+                            max(total - scanned, 0) / rate
+                            if total and rate > 0
+                            else 0.0
+                        )
+                        reserved = (
+                            torch.cuda.memory_reserved() / 1024**3
+                            if torch.cuda.is_available()
+                            else 0.0
+                        )
+                        print(
+                            f"[data] {label}: {scanned:,}/{total:,} scanned "
+                            f"| {accepted:,} accepted "
+                            f"| skip rating={skipped_rating:,}, "
+                            f"upscale={skipped_upscale:,}, "
+                            f"invalid={skipped_invalid:,} "
+                            f"| {rate:.1f} image/s | ETA {eta:.0f}s "
+                            f"| CUDA reserved={reserved:.1f} GiB",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        last_data_report = now
 
                     pending_count = sum(
                         len(values) for values in pending_by_bucket.values()
@@ -565,6 +710,16 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
                         encode_started = time.monotonic()
                         encoded_since_report = 0
                         last_encode_report = encode_started
+
+                elapsed = max(time.monotonic() - shard_started, 1e-6)
+                total = raw_progress.get("total", 0)
+                print(
+                    f"[data] {label}: complete {total:,}/{total:,} scanned, "
+                    f"{accepted:,} accepted in {elapsed:.1f}s "
+                    f"({total / elapsed:.1f} image/s)",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
             flush_all()
             usable = (

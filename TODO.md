@@ -259,6 +259,10 @@ Hugging Face tar shard
   `COLAB_DEEPGHS.md`。
 - DeepGHS Colab 全自动 bootstrap 已完成：自动准备 Wan 源码/VAE、
   T5Gemma encoder、Drive 元数据索引、全量 shard 清单、preflight 和训练。
+- DeepGHS L4 pipeline 已增加 CPU WebP 预解码、Wan batch 16 自适应探测、
+  OOM 二分回退并记忆安全 batch、
+  pinned non-blocking H2D、逐 shard 图片总进度、VAE/T5 进度，以及每个
+  optimizer step 的输入等待比例和 CUDA 峰值日志。
 - https://huggingface.co/datasets/deepghs/danbooru2024-webp-4Mpixel
 - https://huggingface.co/datasets/p1atdev/danbooru-2024
 - https://github.com/deepghs/cheesechaser

@@ -8,6 +8,11 @@ data:
   resolution_stage: "768"
   # Lower time-to-first-step: one 256-latent block instead of waiting for 2048.
   rolling_block_size: 256
+  # CPU decodes the next images while Wan VAE is active on the L4.
+  decode_prefetch: 16
+  # Probe batch 16 to use L4 headroom. The first OOM teaches the dataset to use
+  # 8/4/2/1 for all later batches instead of repeatedly probing an unsafe size.
+  encode_batch_size: 16
   max_upscale: 1.10
   require_metadata: true
 
@@ -15,3 +20,5 @@ train:
   # Keep this aligned with rolling_block_size so text caching does not pull a
   # second VAE block before the first DiT step can begin.
   text_cache_size: 256
+  # Log every optimizer step during streaming runs so stalls are visible.
+  log_every: 1

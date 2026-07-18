@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import random
+import sys
+import time
 from collections.abc import Iterable, Iterator
 from typing import Any
 
@@ -85,9 +87,16 @@ def encode_text_windows(
         if not window:
             return
 
+        text_started = time.monotonic()
         if offload_between_windows:
             text_encoder.move_to_configured_device()
         flat_captions = [caption for group in caption_groups for caption in group]
+        print(
+            f"[text] encoding {len(flat_captions):,} captions "
+            f"in batches of {encoder_batch_size}",
+            file=sys.stderr,
+            flush=True,
+        )
         encoded: list[Tensor] = []
         for start in range(0, len(flat_captions), encoder_batch_size):
             states, mask = text_encoder.encode(
@@ -99,9 +108,21 @@ def encode_text_windows(
                     device="cpu", dtype=cache_dtype
                 ).contiguous()
                 encoded.append(_pin_if_cuda(cached))
+            completed = min(start + encoder_batch_size, len(flat_captions))
+            print(
+                f"[text] {completed:,}/{len(flat_captions):,} captions encoded",
+                file=sys.stderr,
+                flush=True,
+            )
         if offload_between_windows:
             text_encoder.offload_to_cpu()
             torch.cuda.empty_cache()
+        print(
+            f"[text] window ready in {time.monotonic() - text_started:.1f}s; "
+            "starting DiT steps",
+            file=sys.stderr,
+            flush=True,
+        )
 
         offset = 0
         for batch, captions in zip(window, caption_groups, strict=True):

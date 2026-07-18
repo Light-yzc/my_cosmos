@@ -226,6 +226,10 @@ def main() -> None:
     dtype, parameter_dtype = training_dtypes(train_config)
     seed = int(train_config.get("seed", 3407))
     seed_everything(seed)
+    torch.set_float32_matmul_precision("high")
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
 
     caption_config = DanbooruCaptionConfig(
         general_tag_dropout=float(data_config.get("general_tag_dropout", 0.10)),
@@ -312,6 +316,7 @@ def main() -> None:
             prefetch_shards=int(data_config.get("prefetch_shards", 1)),
             block_size=int(data_config.get("rolling_block_size", 2048)),
             encode_batch_size=int(data_config.get("encode_batch_size", 4)),
+            decode_prefetch=int(data_config.get("decode_prefetch", 16)),
             accumulation_multiple=accumulation,
             max_upscale=float(data_config.get("max_upscale", 1.25)),
             allowed_ratings=ratings,
@@ -410,6 +415,11 @@ def main() -> None:
 
     optimizer.zero_grad(set_to_none=True)
     started = time.perf_counter()
+    last_batch_finished = started
+    last_optimizer_finished = started
+    input_wait_window = 0.0
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
     while step < max_steps:
         if sampler is not None:
             sampler.set_epoch(epoch)
@@ -449,6 +459,8 @@ def main() -> None:
             encoded_batches = encode_online()
 
         for batch, text_states, text_mask in encoded_batches:
+            batch_received = time.perf_counter()
+            input_wait_window += max(batch_received - last_batch_finished, 0.0)
             if "source_shard_index" in batch:
                 last_data_cursor = {
                     "epoch": int(batch["stream_epoch"][0]),
@@ -483,6 +495,7 @@ def main() -> None:
             scaler.scale(scaled_loss).backward()
             micro_step += 1
             if micro_step % accumulation:
+                last_batch_finished = time.perf_counter()
                 continue
 
             scaler.unscale_(optimizer)
@@ -496,12 +509,38 @@ def main() -> None:
             step += 1
 
             if step % int(train_config.get("log_every", 10)) == 0:
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                now = time.perf_counter()
                 elapsed = time.perf_counter() - started
+                step_wall = max(now - last_optimizer_finished, 1e-6)
+                input_fraction = min(input_wait_window / step_wall, 1.0)
+                peak_gib = (
+                    torch.cuda.max_memory_allocated() / 1024**3
+                    if torch.cuda.is_available()
+                    else 0.0
+                )
+                cursor_text = ""
+                if last_data_cursor is not None:
+                    cursor_text = (
+                        f" shard={last_data_cursor['shard_index']} "
+                        f"sample={last_data_cursor['sample_index']}"
+                    )
                 print(
                     f"step={step} loss={loss.item():.5f} "
                     f"lr={scheduler.get_last_lr()[0]:.3e} "
-                    f"seconds/step={elapsed / step:.2f}"
+                    f"seconds/step={elapsed / step:.2f} "
+                    f"last_step={step_wall:.2f}s "
+                    f"input_wait={input_wait_window:.2f}s "
+                    f"input_wait_ratio={input_fraction:.1%} "
+                    f"cuda_peak={peak_gib:.1f}GiB"
+                    f"{cursor_text}",
+                    flush=True,
                 )
+                if torch.cuda.is_available():
+                    torch.cuda.reset_peak_memory_stats()
+                last_optimizer_finished = now
+                input_wait_window = 0.0
             if step % int(train_config.get("save_every", 5000)) == 0:
                 save_checkpoint(
                     model,
@@ -518,6 +557,7 @@ def main() -> None:
                 )
             if step >= max_steps:
                 break
+            last_batch_finished = time.perf_counter()
         if step >= max_steps:
             break
         if micro_step == epoch_micro_start:
