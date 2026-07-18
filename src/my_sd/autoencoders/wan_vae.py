@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import importlib
+import hashlib
+import importlib.util
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -32,6 +33,29 @@ def _dtype(name: str) -> torch.dtype:
         raise ValueError(f"Unsupported Wan VAE dtype: {name}") from error
 
 
+def _load_wan_vae_type(module_path: Path):
+    """Load vae2_2.py without executing Wan's dependency-heavy package init."""
+    digest = hashlib.sha1(
+        str(module_path).encode("utf-8"),
+        usedforsecurity=False,
+    ).hexdigest()[:12]
+    module_name = f"_my_sd_wan_vae2_2_{digest}"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load Wan VAE module from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    try:
+        return getattr(module, "Wan2_2_VAE")
+    except AttributeError as error:
+        raise ImportError(f"{module_path} does not define Wan2_2_VAE") from error
+
+
 class WanImageVAE:
     """Thin static-image wrapper around Wan2.2 TI2V-5B's official f16c48 VAE."""
 
@@ -40,17 +64,14 @@ class WanImageVAE:
     def __init__(self, config: WanVAEConfig) -> None:
         repo = Path(config.wan_repo).resolve()
         checkpoint = Path(config.checkpoint).resolve()
-        if not (repo / "wan" / "modules" / "vae2_2.py").is_file():
+        module_path = repo / "wan" / "modules" / "vae2_2.py"
+        if not module_path.is_file():
             raise FileNotFoundError(
                 f"{repo} is not a Wan2.2 source checkout (missing wan/modules/vae2_2.py)"
             )
         if not checkpoint.is_file():
             raise FileNotFoundError(checkpoint)
-        repo_text = str(repo)
-        if repo_text not in sys.path:
-            sys.path.insert(0, repo_text)
-        module = importlib.import_module("wan.modules.vae2_2")
-        vae_type = getattr(module, "Wan2_2_VAE")
+        vae_type = _load_wan_vae_type(module_path)
         target_device = config.device
         target_dtype = config.dtype
         load_device = "cpu" if config.encoder_only else target_device
