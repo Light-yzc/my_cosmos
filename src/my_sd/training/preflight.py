@@ -215,6 +215,12 @@ def run_colab_preflight(
             checks.append(PreflightCheck("ok", "8-bit optimizer", "bitsandbytes"))
 
     precision = str(train.get("precision", "bfloat16")).lower()
+    parameter_precision = str(
+        train.get(
+            "parameter_precision",
+            "float32" if precision in {"float16", "fp16"} else precision,
+        )
+    ).lower()
     if require_cuda:
         if not torch.cuda.is_available():
             checks.append(PreflightCheck("error", "CUDA", "CUDA GPU not available"))
@@ -228,7 +234,11 @@ def run_colab_preflight(
                     f"{properties.name}; {memory_gib:.1f} GiB",
                 )
             )
-            if precision in {"bfloat16", "bf16"} and not torch.cuda.is_bf16_supported():
+            requests_bf16 = any(
+                value in {"bfloat16", "bf16"}
+                for value in (precision, parameter_precision)
+            )
+            if requests_bf16 and not torch.cuda.is_bf16_supported():
                 checks.append(
                     PreflightCheck(
                         "error",
@@ -237,7 +247,13 @@ def run_colab_preflight(
                     )
                 )
             else:
-                checks.append(PreflightCheck("ok", "precision", precision))
+                checks.append(
+                    PreflightCheck(
+                        "ok",
+                        "precision",
+                        f"compute={precision}; parameters={parameter_precision}",
+                    )
+                )
 
     cache_dir = _path_value(data.get("cache_dir", "/content/raw_cache"), working_dir)
     cache_parent = _existing_parent(cache_dir)

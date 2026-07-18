@@ -11,6 +11,7 @@ train:
   output_dir: /content/checkpoints_t4
   checkpoint_mirror_dir: /content/drive/MyDrive/cosmos_anime/checkpoints_t4
   precision: float16
+  parameter_precision: float32
   gradient_accumulation_steps: 32
   text_cache_size: 128
   text_encode_batch_size: 16

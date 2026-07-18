@@ -216,6 +216,7 @@ python scripts/inspect_model.py --config configs/cosmos_08b_anime.yaml
 默认配置以以下组合为目标：
 
 - BF16 model 和 activation；
+- T4/V100 使用 FP32 主权重 + FP16 autocast/GradScaler，避免 FP16 参数无法 unscale；
 - PyTorch SDPA；
 - 每层 activation checkpoint；
 - micro-batch 1；
@@ -250,6 +251,22 @@ python scripts/inspect_model.py --config configs/cosmos_08b_anime.yaml
 ```powershell
 pytest
 ```
+
+本机 CUDA 性能 smoke：
+
+```powershell
+python scripts/gpu_smoke.py `
+  --config configs/cosmos_08b_anime.yaml `
+  --pixel-size 768x768 `
+  --precision float16 `
+  --parameter-precision float32 `
+  --text-length 192 `
+  --sdpa-backend efficient `
+  --gradient-checkpointing `
+  --optimizer adamw8bit
+```
+
+Tesla V100-SXM2-16GB 实测完整 0.83B 主干：768² 约 1.05 秒/step、峰值 7.94 GiB；1024² 约 1.17 秒/step、峰值 7.97 GiB。该结果包含 backward 与 8-bit optimizer step，不包含 T5/Wan 编码。V100 不适合 FA2/FA3，默认 PyTorch memory-efficient SDPA 即为本项目在该卡上的推荐后端。
 
 ## 主要参考
 

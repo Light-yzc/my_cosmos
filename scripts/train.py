@@ -45,6 +45,7 @@ from my_sd.models import (
 )
 from my_sd.training.flow_matching import flow_matching_loss, make_flow_matching_batch
 from my_sd.training.optimizers import build_optimizer
+from my_sd.training.precision import grad_scaler_enabled, training_dtypes
 from my_sd.training.text_cache import apply_cfg_dropout, encode_text_windows
 from my_sd.training.checkpoints import (
     AsyncCheckpointMirror,
@@ -60,20 +61,6 @@ def seed_everything(seed: int) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-
-
-def training_dtype(name: str) -> torch.dtype:
-    values = {
-        "bfloat16": torch.bfloat16,
-        "bf16": torch.bfloat16,
-        "float16": torch.float16,
-        "fp16": torch.float16,
-        "float32": torch.float32,
-    }
-    try:
-        return values[name.lower()]
-    except KeyError as error:
-        raise ValueError(f"Unsupported training precision: {name}") from error
 
 
 def learning_rate_multiplier(
@@ -236,7 +223,7 @@ def main() -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("The full training configuration requires a CUDA GPU")
     device = torch.device("cuda")
-    dtype = training_dtype(str(train_config.get("precision", "bfloat16")))
+    dtype, parameter_dtype = training_dtypes(train_config)
     seed = int(train_config.get("seed", 3407))
     seed_everything(seed)
 
@@ -349,7 +336,7 @@ def main() -> None:
     text_encoder = T5GemmaEncoder(text_config)
     if isinstance(dataset, RollingWanDataset):
         text_encoder.offload_to_cpu()
-    model = initialize_model(model_config, device, dtype)
+    model = initialize_model(model_config, device, parameter_dtype)
     model.train()
     optimizer = build_optimizer(model, train_config)
     max_steps = int(train_config["max_steps"])
@@ -362,7 +349,10 @@ def main() -> None:
             minimum_ratio=float(train_config.get("min_learning_rate_ratio", 0.1)),
         ),
     )
-    scaler = torch.amp.GradScaler("cuda", enabled=dtype == torch.float16)
+    scaler = torch.amp.GradScaler(
+        "cuda",
+        enabled=grad_scaler_enabled(dtype, parameter_dtype),
+    )
     cfg_dropout = float(train_config.get("cfg_dropout", 0.15))
     output_dir = Path(train_config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -409,6 +399,10 @@ def main() -> None:
         print(f"resumed {resume_path} at optimizer step {step}")
         del restored
     print(f"trainable parameters: {model.trainable_parameter_count():,}")
+    print(
+        f"compute dtype: {dtype}; parameter dtype: {parameter_dtype}; "
+        f"gradient scaler: {scaler.is_enabled()}"
+    )
     sample_count = f"{len(dataset):,}" if hasattr(dataset, "__len__") else "streaming"
     print(f"samples: {sample_count}; gradient accumulation: {accumulation}")
 

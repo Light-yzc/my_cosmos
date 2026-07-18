@@ -163,15 +163,17 @@ class CrossAttention(nn.Module):
         k = _rms_norm(k, self.k_norm).transpose(1, 2)
         v = v.transpose(1, 2)
 
-        bias = None
+        attention_mask = None
         if context_mask is not None:
             valid = context_mask.to(device=x.device, dtype=torch.bool)
-            bias = torch.zeros(
-                (batch, 1, 1, context_length), device=x.device, dtype=q.dtype
-            )
-            bias.masked_fill_(~valid[:, None, None, :], torch.finfo(q.dtype).min)
+            attention_mask = valid[:, None, None, :]
 
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
+        out = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attention_mask,
+        )
         out = out.transpose(1, 2).reshape(batch, query_length, width)
         return self.output(out)
 
@@ -426,6 +428,7 @@ class CosmosDiT(nn.Module):
                     rope_cos,
                     rope_sin,
                     use_reentrant=False,
+                    preserve_rng_state=False,
                 )
             else:
                 x = block(

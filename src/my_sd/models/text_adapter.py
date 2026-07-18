@@ -31,15 +31,12 @@ class TextAdapterAttention(nn.Module):
         k = _rms_norm(k, self.k_norm).transpose(1, 2)
         v = v.transpose(1, 2)
 
-        bias = None
+        sdpa_mask = None
         if attention_mask is not None:
             valid = attention_mask.to(device=x.device, dtype=torch.bool)
-            bias = torch.zeros(
-                (batch, 1, 1, length), device=x.device, dtype=q.dtype
-            )
-            bias.masked_fill_(~valid[:, None, None, :], torch.finfo(q.dtype).min)
+            sdpa_mask = valid[:, None, None, :]
 
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=bias)
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=sdpa_mask)
         out = out.transpose(1, 2).reshape(batch, length, width)
         return self.out(out)
 
@@ -89,4 +86,3 @@ class TextConditioningAdapter(nn.Module):
         for block in self.blocks:
             x = block(x, attention_mask)
         return self.output_norm(x)
-

@@ -1,6 +1,6 @@
 # 项目交接 / TODO
 
-最后整理：2026-07-17（Colab rolling 部署入口完成后）
+最后整理：2026-07-18（本地 CUDA 性能与 optimizer smoke 完成后）
 
 ## 1. 项目目标
 
@@ -268,7 +268,7 @@ Hugging Face tar shard
 - streaming latent tar 后端。
 - rectified-flow batch 和 loss。
 - BF16 / FP16 autocast。
-- T4 FP16 GradScaler。
+- 计算精度与参数精度分离：T4/V100 默认 FP32 主权重 + FP16 autocast/GradScaler；L4 使用 BF16 参数与计算。
 - activation checkpointing。
 - gradient accumulation。
 - gradient clipping。
@@ -284,7 +284,7 @@ Hugging Face tar shard
 
 已经修复：
 
-- T4 使用 FP16 scaler。
+- 修复 T4/V100 直接用 FP16 参数时 GradScaler 在 optimizer step 报错；现在 FP16 计算默认保留 FP32 主权重。
 - 数据模块缺少 `random` import。
 - T5Gemma 错误保留 vision tower。
 - meta device + `to_empty()` 导致非 module 参数未初始化；现改为直接在目标 device/dtype 构造。
@@ -304,25 +304,43 @@ CPU smoke tests 覆盖：
 - text window cache。
 - YAML 继承和正式配置参数量。
 
-最后一次已记录结果：
+最后一次已记录结果（本机 CUDA PyTorch 环境）：
 
 ```text
-31 passed
+36 passed
 ```
 
-这是 CPU 小模型/逻辑测试，**不是**真实 0.8B + Wan + T5 的 GPU 端到端验证。
+此外已在 Tesla V100-SXM2-16GB、PyTorch 2.6.0+cu124 上完成真实 0.83B DiT 的 forward/backward、GradScaler 与 AdamW8bit optimizer step；仍不是 Wan + T5 + DiT 的完整端到端验证。
+
+### 本地 GPU 性能记录
+
+测试入口：`scripts/gpu_smoke.py`。条件为完整 27 层、830,590,992 参数、batch 1、text length 192、activation checkpointing、FP32 主权重、FP16 autocast、bitsandbytes AdamW8bit：
+
+```text
+768×768：  1.052 s/step，0.950 step/s，峰值 allocated 7.941 GiB
+1024×1024：1.174 s/step，0.852 step/s，峰值 allocated 7.973 GiB
+```
+
+数字只包含 DiT、loss、backward、GradScaler 和 optimizer step，不包含数据下载、T5 编码与 Wan 编码。rolling 模式会在 Wan 编码阶段暂停训练并换出 encoder，因此这些峰值不能直接相加。
+
+attention 后端实测：
+
+- Windows PyTorch 未编译 FlashAttention，且 V100 是 SM70，不适合安装 FA2/FA3。
+- PyTorch memory-efficient SDPA 可用；在 width 1280 / depth 2 / 512×768 对照中约 `0.067 s/step`，强制 math 约 `0.090 s/step`，快约 26%。
+- 默认 `auto` 已会选择可用的高效 kernel；无需在 V100 上强装 FlashAttention。
 
 ## 8. Colab 配置
 
 - `configs/colab_l4.yaml`
   - 27 层、约 0.83B 总参数。
   - BF16。
+  - BF16 参数与计算，不启用 GradScaler。
   - text window 256 / encode batch 32。
   - gradient accumulation 16。
 
 - `configs/colab_t4.yaml`
   - 20 层，接近官方 0.6B 规模。
-  - FP16。
+  - FP32 主权重 + FP16 autocast/GradScaler。
   - text max length 128。
   - text window 128 / encode batch 16。
   - T5 window 之间 offload。
@@ -398,15 +416,15 @@ CPU smoke tests 覆盖：
 
 ### P0.4 真实 GPU 集成验证
 
-本地只检测到 16 GB Tesla V100，且工作区没有 Wan2.2/T5 checkpoint，不能替代目标 L4/T4/22–24 GB 环境的验证。
+本地检测到 16 GB Tesla V100。完整 27 层 DiT 已通过 768/1024、AdamW8bit optimizer step 和显存峰值验证；工作区没有 Wan2.2/T5 checkpoint，因此仍不能替代目标 L4/T4/22–24 GB 上的完整 encoder + rolling 集成验证。
 
 至少完成：
 
 1. Wan VAE 对 8–16 张不同长宽比图片编码。
 2. 检查 latent 是 `[B, 48, H/16, W/16]`。
 3. T5 encoder-only 输出 `[B, L, 640]`。
-4. 小 depth DiT 完整 forward/backward。
-5. 27 层 L4 显存峰值测试。
+4. 已完成：完整 27 层 DiT forward/backward、GradScaler、gradient clipping 路径同类验证及 AdamW8bit step。
+5. 已完成本地 V100 27 层峰值；仍需 L4 BF16 实机复测。
 6. 20 层 T4 显存峰值测试。
 7. 已完成：Colab 配置在 bitsandbytes 不可用时直接失败，不再静默退回 FP32 AdamW。
 8. 分别测下载、VAE encode、T5 encode、DiT forward/backward 的吞吐。
@@ -506,7 +524,7 @@ python scripts/train.py \
 ## 14. 建议的第一天接手顺序
 
 1. 已完成：初始化 Git 并提交恢复基线。
-2. 已完成：本地 31 个 CPU/逻辑测试通过。
+2. 已完成：本地 36 个 CPU/逻辑测试通过，并完成 0.83B DiT CUDA optimizer smoke。
 3. 用 AnimeTimm 50k 的 1 个 tar 做真实 Wan encode smoke test。
 4. 用小 depth 配置训练 100–500 step，确认 loss、resume 和非方形 batch。
 5. 已完成本地部署入口与 preflight；仍需在 Colab 实测 rolling raw 下载、Wan 换入换出与 checkpoint mirror。

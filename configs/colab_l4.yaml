@@ -23,6 +23,7 @@ train:
   checkpoint_mirror_dir: /content/drive/MyDrive/cosmos_anime/checkpoints_l4
   keep_last_checkpoints: 2
   precision: bfloat16
+  parameter_precision: bfloat16
   optimizer: adamw8bit
   allow_optimizer_fallback: false
   gradient_accumulation_steps: 16
