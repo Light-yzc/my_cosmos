@@ -7,6 +7,7 @@ import os
 import random
 import re
 import shutil
+import sys
 import tarfile
 import time
 import urllib.parse
@@ -97,6 +98,15 @@ def _download_headers(url: str, *, existing_bytes: int = 0) -> dict[str, str]:
     return headers
 
 
+def _human_bytes(value: float) -> str:
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    for unit in units[:-1]:
+        if abs(value) < 1024:
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} {units[-1]}"
+
+
 class AsyncShardPrefetcher:
     """Downloads upcoming tar shards while the caller consumes the current one."""
 
@@ -172,6 +182,8 @@ class AsyncShardPrefetcher:
         self,
         url: str,
         temporary: Path,
+        *,
+        label: str,
     ) -> int | None:
         existing = temporary.stat().st_size if temporary.is_file() else 0
         headers = _download_headers(url, existing_bytes=existing)
@@ -202,8 +214,59 @@ class AsyncShardPrefetcher:
             remaining = total - existing if total is not None else None
             self._check_disk_budget(remaining)
             mode = "ab" if append else "wb"
+            started = time.monotonic()
+            last_report = started
+            downloaded_at_start = existing
+            print(
+                f"[download] {label}: starting at {_human_bytes(existing)}"
+                + (
+                    f" / {_human_bytes(total)}"
+                    if total is not None
+                    else " / unknown size"
+                ),
+                file=sys.stderr,
+                flush=True,
+            )
             with temporary.open(mode) as output:
-                shutil.copyfileobj(response, output, length=8 * 1024 * 1024)
+                while True:
+                    # Keep reads small enough that slow Colab links still emit
+                    # visible progress instead of blocking on a multi-MiB read.
+                    chunk = response.read(256 * 1024)
+                    if not chunk:
+                        break
+                    output.write(chunk)
+                    existing += len(chunk)
+                    now = time.monotonic()
+                    if now - last_report >= 2.0:
+                        elapsed = max(now - started, 1e-6)
+                        speed = (existing - downloaded_at_start) / elapsed
+                        percent = (
+                            f"{existing / total * 100:5.1f}%"
+                            if total
+                            else "  ?.?%"
+                        )
+                        print(
+                            f"[download] {label}: {percent} "
+                            f"{_human_bytes(existing)}"
+                            + (
+                                f" / {_human_bytes(total)}"
+                                if total is not None
+                                else ""
+                            )
+                            + f" | {_human_bytes(speed)}/s"
+                            f" | {elapsed:.0f}s",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        last_report = now
+            elapsed = max(time.monotonic() - started, 1e-6)
+            speed = (existing - downloaded_at_start) / elapsed
+            print(
+                f"[download] {label}: complete, {_human_bytes(existing)} "
+                f"in {elapsed:.1f}s ({_human_bytes(speed)}/s)",
+                file=sys.stderr,
+                flush=True,
+            )
         return total
 
     def _download(self, source: str) -> tuple[Path, bool]:
@@ -221,6 +284,12 @@ class AsyncShardPrefetcher:
         digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
         destination = self.cache_dir / f"{digest}-{basename}"
         if destination.is_file():
+            print(
+                f"[download] {basename}: cache hit "
+                f"({_human_bytes(destination.stat().st_size)})",
+                file=sys.stderr,
+                flush=True,
+            )
             return destination, True
 
         temporary = destination.with_suffix(destination.suffix + ".part")
@@ -228,7 +297,16 @@ class AsyncShardPrefetcher:
         expected_total: int | None = None
         for attempt in range(self.retries):
             try:
-                expected_total = self._download_once(url, temporary)
+                if attempt:
+                    print(
+                        f"[download] {basename}: retry "
+                        f"{attempt + 1}/{self.retries}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                expected_total = self._download_once(
+                    url, temporary, label=basename
+                )
                 actual_size = temporary.stat().st_size
                 if expected_total is not None and actual_size != expected_total:
                     raise OSError(
@@ -242,7 +320,14 @@ class AsyncShardPrefetcher:
                     raise
                 if attempt + 1 >= self.retries:
                     raise
-                time.sleep(min(2**attempt, 8))
+                delay = min(2**attempt, 8)
+                print(
+                    f"[download] {basename}: {type(error).__name__}: {error}; "
+                    f"retrying in {delay}s",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(delay)
         else:
             assert last_error is not None
             raise last_error

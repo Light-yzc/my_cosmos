@@ -87,3 +87,8 @@ os.environ["HF_TOKEN"] = userdata.get("HF_TOKEN")
 编码，随后卸载 VAE 并训练 DiT。tar 用完即删除，checkpoint 镜像写入
 `/content/drive/MyDrive/cosmos`。配置将 `max_upscale` 设为 1.10，避免把
 低分辨率图片强行放大到 768 桶。
+
+下载日志每约 2 秒输出一次当前文件名、百分比、已下载/总大小、平均速度
+和耗时。断流会显示异常、等待时间和重试次数；已有文件会显示
+`cache hit`。Hugging Face 模型和 35 个元数据 Parquet 使用独立进度条，
+元数据分桶阶段也会显示 DuckDB 扫描进度。

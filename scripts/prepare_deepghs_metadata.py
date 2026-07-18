@@ -9,6 +9,7 @@ from pathlib import Path
 def main() -> None:
     import duckdb
     from huggingface_hub import snapshot_download
+    from huggingface_hub.utils import enable_progress_bars
 
     parser = argparse.ArgumentParser(
         description=(
@@ -39,7 +40,8 @@ def main() -> None:
     args.build_dir.mkdir(parents=True)
     args.download_dir.mkdir(parents=True, exist_ok=True)
 
-    print("downloading 35 metadata parquet shards...")
+    enable_progress_bars()
+    print("downloading 35 metadata parquet shards...", flush=True)
     snapshot_download(
         repo_id=args.repo,
         repo_type="dataset",
@@ -69,8 +71,17 @@ def main() -> None:
       COMPRESSION ZSTD
     )
     """
-    print("building 1000 metadata partitions (one full metadata scan)...")
-    duckdb.connect().execute(query)
+    print(
+        "building 1000 metadata partitions (one full metadata scan)...",
+        flush=True,
+    )
+    connection = duckdb.connect()
+    connection.execute("SET enable_progress_bar = true")
+    connection.execute("SET progress_bar_time = 1000")
+    started = __import__("time").monotonic()
+    connection.execute(query)
+    elapsed = __import__("time").monotonic() - started
+    print(f"metadata partition build completed in {elapsed:.1f}s", flush=True)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     if args.output.exists():
