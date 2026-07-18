@@ -1,0 +1,65 @@
+# Colab L4：DeepGHS Danbooru 2024 流式训练
+
+数据源为 `deepghs/danbooru2024-webp-4Mpixel`，约 805 万张图片，
+单图限制为 4MP。图片 tar 与标签元数据分开存放，因此首次使用需要建立
+一次元数据索引；索引存到 Google Drive 后，后续 Colab 会话无需重建。
+
+## 1. 环境和权限
+
+先在 Hugging Face 网页接受 DeepGHS 数据集的 gated/sensitive 访问条款，
+然后在 Colab 设置 token：
+
+```python
+import os
+from google.colab import userdata
+os.environ["HF_TOKEN"] = userdata.get("HF_TOKEN")
+```
+
+```bash
+%cd /content/my_cosmos
+!uv sync --extra train --extra fa2
+```
+
+## 2. 首次建立标签索引
+
+源 Parquet 和构建临时文件放在 Colab 本地盘，最终索引才复制到 Drive：
+
+```bash
+!uv run python scripts/prepare_deepghs_metadata.py \
+  --download-dir /content/deepghs_metadata_source \
+  --build-dir /content/deepghs_metadata_build \
+  --output /content/drive/MyDrive/cosmos/deepghs_metadata
+```
+
+脚本只扫描完整元数据一次，按 `Danbooru ID % 1000` 生成与
+`images/0000.tar` 至 `images/0999.tar` 对应的 1000 个分区。若目标已存在，
+脚本会直接跳过。
+
+## 3. 生成图片 tar 清单
+
+先用少量 shard 做 smoke，确认完整训练链路：
+
+```bash
+!uv run python scripts/list_hf_shards.py \
+  --repo deepghs/danbooru2024-webp-4Mpixel \
+  --split images \
+  --output /content/deepghs_raw_shards.txt \
+  --limit 2
+```
+
+正式训练时删除 `--limit 2`。清单只是 1000 个远程 URL，不会预下载图片。
+
+## 4. 流式训练
+
+```bash
+!uv run python scripts/preflight_colab.py \
+  --config configs/colab_l4_fa2_deepghs.yaml
+
+!uv run python scripts/train.py \
+  --config configs/colab_l4_fa2_deepghs.yaml
+```
+
+训练过程会异步下载下一份图片 tar；当前 tar 在 GPU 上批量做 Wan VAE
+编码，随后卸载 VAE 并训练 DiT。tar 用完即删除，checkpoint 镜像写入
+`/content/drive/MyDrive/cosmos`。配置将 `max_upscale` 设为 1.10，避免把
+低分辨率图片强行放大到 768 桶。

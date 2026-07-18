@@ -78,7 +78,8 @@ def main() -> None:
         files = files[: args.limit]
     if not files:
         raise RuntimeError(
-            f"No tar files found in dataset {args.repo!r} under {prefix!r}"
+            f"No tar files found in dataset {args.repo!r} "
+            f"under {args.split.strip('/') + '/'!r}"
         )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)

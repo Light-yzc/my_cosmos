@@ -79,6 +79,25 @@ def test_raw_tar_requires_caption_metadata(tmp_path) -> None:
     assert {sample[0] for sample in optional} == {"1000", "missing"}
 
 
+def test_raw_tar_uses_external_deepghs_metadata(tmp_path) -> None:
+    path = tmp_path / "0000.tar"
+    with tarfile.open(path, "w") as archive:
+        _add_bytes(archive, "folder/1000.webp", _image_bytes((1, 2, 3)))
+    samples = list(
+        iter_raw_tar(
+            path,
+            external_metadata={
+                "1000": {
+                    "rating": "g",
+                    "tag_string_general": "1girl blue_hair",
+                }
+            },
+        )
+    )
+    assert len(samples) == 1
+    assert samples[0][2]["tag_string_general"] == "1girl blue_hair"
+
+
 def test_rolling_dataset_offloads_before_yield_and_drops_partial_accumulation(
     tmp_path,
 ) -> None:

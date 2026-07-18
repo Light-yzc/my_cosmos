@@ -1,0 +1,10 @@
+extends: colab_l4_fa2_24gb.yaml
+
+data:
+  # Generated with list_hf_shards.py --repo deepghs/danbooru2024-webp-4Mpixel
+  # --split images. The gated dataset requires HF_TOKEN and accepted access.
+  shard_list: /content/deepghs_raw_shards.txt
+  metadata_index_dir: /content/drive/MyDrive/cosmos/deepghs_metadata
+  resolution_stage: "768"
+  max_upscale: 1.10
+  require_metadata: true

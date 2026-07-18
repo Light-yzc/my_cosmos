@@ -184,6 +184,27 @@ def run_colab_preflight(
                 )
 
     if backend == "rolling_raw" and check_assets:
+        metadata_index_value = data.get("metadata_index_dir")
+        if metadata_index_value:
+            metadata_index = _path_value(metadata_index_value, working_dir)
+            partitions = list(metadata_index.glob("bucket=*/*.parquet"))
+            partitions.extend(metadata_index.glob("????.parquet"))
+            if not partitions:
+                checks.append(
+                    PreflightCheck(
+                        "error",
+                        "DeepGHS metadata",
+                        f"no metadata partitions found under {metadata_index}",
+                    )
+                )
+            else:
+                checks.append(
+                    PreflightCheck(
+                        "ok",
+                        "DeepGHS metadata",
+                        f"{len(partitions)} partition(s) under {metadata_index}",
+                    )
+                )
         wan_repo = _path_value(data.get("wan_repo", ""), working_dir)
         wan_module = wan_repo / "wan" / "modules" / "vae2_2.py"
         if not wan_module.is_file():

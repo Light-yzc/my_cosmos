@@ -25,6 +25,7 @@ from .buckets import (
     cover_resize_and_center_crop,
 )
 from .captions import DanbooruCaptioner
+from .deepghs_metadata import DeepGHSMetadataIndex
 from .tar_stream import AsyncShardPrefetcher
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
@@ -102,6 +103,7 @@ def iter_raw_tar(
     path: str | Path,
     *,
     require_metadata: bool = True,
+    external_metadata: Mapping[str, Mapping[str, object]] | None = None,
 ) -> Iterator[tuple[str, Image.Image, dict[str, Any]]]:
     """
     Reads WebDataset-style image + JSON/TXT samples.
@@ -139,6 +141,11 @@ def iter_raw_tar(
                     metadata["general_tags"] = (
                         sidecar.read().decode("utf-8").strip()
                     )
+            if external_metadata is not None:
+                sample_id = Path(key).name
+                indexed = external_metadata.get(sample_id)
+                if indexed:
+                    metadata.update(indexed)
             if require_metadata and not has_caption_metadata(metadata):
                 continue
             image_file = archive.extractfile(image_member)
@@ -203,6 +210,7 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
         max_upscale: float = 1.25,
         allowed_ratings: Sequence[str] | None = None,
         require_metadata: bool = True,
+        metadata_index_dir: str | Path | None = None,
         delete_after_use: bool = True,
         shuffle_shards: bool = True,
         download_retries: int = 4,
@@ -252,6 +260,11 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
             else None
         )
         self.require_metadata = require_metadata
+        self.metadata_index = (
+            DeepGHSMetadataIndex(metadata_index_dir)
+            if metadata_index_dir is not None
+            else None
+        )
         self.delete_after_use = delete_after_use
         self.shuffle_shards = shuffle_shards
         self.download_retries = download_retries
@@ -411,9 +424,16 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
         try:
             for shard_offset, shard_path in enumerate(prefetcher):
                 shard_index = start_shard + shard_offset
+                source = sources[shard_offset]
+                external_metadata = (
+                    self.metadata_index.load_for_source(source)
+                    if self.metadata_index is not None
+                    else None
+                )
                 raw_samples = iter_raw_tar(
                     shard_path,
                     require_metadata=self.require_metadata,
+                    external_metadata=external_metadata,
                 )
                 for sample_index, (key, image, metadata) in enumerate(raw_samples):
                     if (

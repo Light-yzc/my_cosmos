@@ -254,6 +254,9 @@ Hugging Face tar shard
 参考：
 
 - https://huggingface.co/datasets/animetimm/danbooru-wdtagger-v4-w640-ws-full
+- DeepGHS 4MP/约 805 万图数据源、外置 Danbooru 2024 Parquet 标签的
+  1000 桶索引、异步 tar 下载与 rolling Wan 编码已接入；使用说明见
+  `COLAB_DEEPGHS.md`。
 - https://huggingface.co/datasets/deepghs/danbooru2024-webp-4Mpixel
 - https://huggingface.co/datasets/p1atdev/danbooru-2024
 - https://github.com/deepghs/cheesechaser

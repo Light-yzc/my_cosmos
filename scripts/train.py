@@ -318,6 +318,7 @@ def main() -> None:
             require_metadata=bool(
                 data_config.get("require_metadata", True)
             ),
+            metadata_index_dir=data_config.get("metadata_index_dir"),
             delete_after_use=bool(data_config.get("delete_after_use", True)),
             **shard_download_options(data_config),
             seed=seed,
