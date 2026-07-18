@@ -10,6 +10,7 @@ import shutil
 import tarfile
 import time
 import urllib.parse
+import urllib.error
 import urllib.request
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -70,6 +71,30 @@ def _expand_hf_url(source: str) -> str:
     prefix = "datasets/" if repo_type == "datasets" else ""
     quoted_name = "/".join(urllib.parse.quote(part) for part in filename)
     return f"https://huggingface.co/{prefix}{owner}/{repo}/resolve/main/{quoted_name}"
+
+
+def _huggingface_token() -> str | None:
+    for name in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+        token = os.environ.get(name)
+        if token:
+            return token
+    try:
+        from huggingface_hub import get_token
+
+        return get_token()
+    except (ImportError, OSError):
+        return None
+
+
+def _download_headers(url: str, *, existing_bytes: int = 0) -> dict[str, str]:
+    headers = {"User-Agent": "cosmos-anime-colab/0.1"}
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    token = _huggingface_token()
+    if token and (host == "huggingface.co" or host.endswith(".huggingface.co")):
+        headers["Authorization"] = f"Bearer {token}"
+    if existing_bytes:
+        headers["Range"] = f"bytes={existing_bytes}-"
+    return headers
 
 
 class AsyncShardPrefetcher:
@@ -149,16 +174,22 @@ class AsyncShardPrefetcher:
         temporary: Path,
     ) -> int | None:
         existing = temporary.stat().st_size if temporary.is_file() else 0
-        headers = {"User-Agent": "cosmos-anime-colab/0.1"}
-        token = os.environ.get("HF_TOKEN")
-        if token and "huggingface.co" in urllib.parse.urlparse(url).netloc:
-            headers["Authorization"] = f"Bearer {token}"
-        if existing:
-            headers["Range"] = f"bytes={existing}-"
+        headers = _download_headers(url, existing_bytes=existing)
         request = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(
-            request, timeout=self.timeout_seconds
-        ) as response:
+        try:
+            response_context = urllib.request.urlopen(
+                request,
+                timeout=self.timeout_seconds,
+            )
+        except urllib.error.HTTPError as error:
+            if error.code in {401, 403} and "huggingface.co" in url:
+                raise PermissionError(
+                    "Hugging Face denied shard access. Ensure the selected "
+                    "dataset terms were accepted, then expose HF_TOKEN or run "
+                    "`hf auth login` inside the uv environment."
+                ) from error
+            raise
+        with response_context as response:
             status = int(getattr(response, "status", response.getcode()))
             append = existing > 0 and status == 206
             if not append:
@@ -207,6 +238,8 @@ class AsyncShardPrefetcher:
                 break
             except Exception as error:
                 last_error = error
+                if isinstance(error, PermissionError):
+                    raise
                 if attempt + 1 >= self.retries:
                     raise
                 time.sleep(min(2**attempt, 8))

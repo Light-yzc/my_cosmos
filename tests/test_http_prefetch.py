@@ -3,7 +3,11 @@ from __future__ import annotations
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from my_sd.data.tar_stream import AsyncShardPrefetcher, shard_download_options
+from my_sd.data.tar_stream import (
+    AsyncShardPrefetcher,
+    _download_headers,
+    shard_download_options,
+)
 
 
 def test_download_options_convert_gibibytes_to_bytes() -> None:
@@ -21,6 +25,29 @@ def test_download_options_convert_gibibytes_to_bytes() -> None:
         "minimum_free_bytes": int(1.5 * 1024**3),
         "max_cache_bytes": 3 * 1024**3,
     }
+
+
+def test_huggingface_headers_use_environment_token(monkeypatch) -> None:
+    monkeypatch.setenv("HF_TOKEN", "secret-token")
+    headers = _download_headers(
+        "https://huggingface.co/datasets/owner/repo/resolve/main/train/a.tar",
+        existing_bytes=123,
+    )
+    assert headers["Authorization"] == "Bearer secret-token"
+    assert headers["Range"] == "bytes=123-"
+
+
+def test_huggingface_headers_use_cached_login(monkeypatch) -> None:
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    monkeypatch.setattr(
+        "huggingface_hub.get_token",
+        lambda: "cached-token",
+    )
+    headers = _download_headers(
+        "https://huggingface.co/datasets/owner/repo/resolve/main/train/a.tar"
+    )
+    assert headers["Authorization"] == "Bearer cached-token"
 
 
 def test_http_prefetch_resumes_existing_part_file(tmp_path) -> None:
