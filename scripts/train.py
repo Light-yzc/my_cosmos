@@ -51,6 +51,7 @@ from my_sd.training.checkpoints import (
     AsyncCheckpointMirror,
     checkpoint_is_complete,
     prune_checkpoints,
+    replace_directory,
     resolve_resume_path,
     update_latest,
 )
@@ -142,7 +143,7 @@ def save_checkpoint(
         )
         if checkpoint_dir.exists():
             shutil.rmtree(checkpoint_dir)
-        temporary.replace(checkpoint_dir)
+        replace_directory(temporary, checkpoint_dir)
     finally:
         if temporary.exists():
             shutil.rmtree(temporary)

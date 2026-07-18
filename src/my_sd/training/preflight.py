@@ -58,6 +58,18 @@ def _path_value(value: object, cwd: Path) -> Path:
     return path if path.is_absolute() else cwd / path
 
 
+def _metadata_partition_stats(root: Path) -> tuple[int, int]:
+    files = list(root.glob("bucket=*/*.parquet"))
+    direct = list(root.glob("????.parquet"))
+    buckets = {
+        path.parent.name.removeprefix("bucket=")
+        for path in files
+        if path.parent.name.startswith("bucket=")
+    }
+    buckets.update(path.stem for path in direct)
+    return len(buckets), len(files) + len(direct)
+
+
 def run_colab_preflight(
     config_path: str | Path,
     *,
@@ -231,10 +243,11 @@ def run_colab_preflight(
         metadata_index_value = data.get("metadata_index_dir")
         if metadata_index_value:
             metadata_index = _path_value(metadata_index_value, working_dir)
-            partitions = list(metadata_index.glob("bucket=*/*.parquet"))
-            partitions.extend(metadata_index.glob("????.parquet"))
+            bucket_count, parquet_file_count = _metadata_partition_stats(
+                metadata_index
+            )
             metadata_manifest = metadata_index / "_index_manifest.json"
-            if not partitions:
+            if not parquet_file_count:
                 checks.append(
                     PreflightCheck(
                         "error",
@@ -272,15 +285,17 @@ def run_colab_preflight(
                         == DEEPGHS_SOURCE_REPO
                         and manifest_value.get("source_filename")
                         == DEEPGHS_SOURCE_FILENAME
-                        and 900 <= len(partitions) <= 1100
+                        and 900 <= bucket_count <= 1100
+                        and parquet_file_count >= bucket_count
                     )
                     checks.append(
                         PreflightCheck(
                             "ok" if current else "error",
                             "DeepGHS metadata",
                             (
-                                f"{len(partitions)} same-source partition(s) "
-                                f"under {metadata_index}"
+                                f"{bucket_count} same-source bucket(s), "
+                                f"{parquet_file_count} parquet file(s) under "
+                                f"{metadata_index}"
                                 if current
                                 else "index manifest/source is stale or "
                                 "mismatched; rerun "

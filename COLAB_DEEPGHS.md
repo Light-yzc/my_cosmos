@@ -66,6 +66,11 @@ step，并使用 `/content/checkpoints_l4_fa2_smoke`、
 `images/0000.tar` 至 `images/0999.tar` 对应的 1000 个分区。若目标已存在，
 脚本会校验 `_index_manifest.json` 的版本、来源和分区数；只有完全匹配才
 跳过。旧索引会先在 Colab 本地构建完成，再替换 Drive 上的目录。
+这里的“1000 个分区”指 `bucket=0000` 至 `bucket=0999` 目录；DuckDB
+可以在每个目录内写多个 Parquet 文件，因此物理文件总数大于 1000 是正常
+现象。构建中断后重跑会直接复用已经完整的约 1000 个 bucket，不再扫描。
+若旧的失败构建产生了上万个小文件，脚本会先在 Colab 本地压实为约每个
+bucket 一个文件，再复制到 Drive，避免 Drive 小文件 I/O 成为新瓶颈。
 
 ## 3. 生成图片 tar 清单
 

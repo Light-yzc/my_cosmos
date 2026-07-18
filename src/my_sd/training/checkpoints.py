@@ -2,12 +2,32 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Iterable
 
 REQUIRED_CHECKPOINT_FILES = ("model.safetensors", "training_state.pt")
+
+
+def replace_directory(
+    source: str | Path,
+    destination: str | Path,
+    *,
+    retries: int = 6,
+) -> Path:
+    """Atomically rename a directory, tolerating short-lived Windows/Drive locks."""
+    source_path = Path(source)
+    destination_path = Path(destination)
+    for attempt in range(retries):
+        try:
+            return source_path.replace(destination_path)
+        except PermissionError:
+            if attempt + 1 >= retries:
+                raise
+            time.sleep(0.05 * (2**attempt))
+    raise AssertionError("unreachable")
 
 
 def checkpoint_is_complete(path: str | Path) -> bool:
@@ -119,7 +139,7 @@ def mirror_checkpoint(
             shutil.copytree(source, temporary)
             if destination.exists():
                 shutil.rmtree(destination)
-            temporary.replace(destination)
+            replace_directory(temporary, destination)
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)
