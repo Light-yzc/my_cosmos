@@ -257,6 +257,8 @@ Hugging Face tar shard
 - DeepGHS 4MP/约 805 万图数据源、外置 Danbooru 2024 Parquet 标签的
   1000 桶索引、异步 tar 下载与 rolling Wan 编码已接入；使用说明见
   `COLAB_DEEPGHS.md`。
+- DeepGHS Colab 全自动 bootstrap 已完成：自动准备 Wan 源码/VAE、
+  T5Gemma encoder、Drive 元数据索引、全量 shard 清单、preflight 和训练。
 - https://huggingface.co/datasets/deepghs/danbooru2024-webp-4Mpixel
 - https://huggingface.co/datasets/p1atdev/danbooru-2024
 - https://github.com/deepghs/cheesechaser

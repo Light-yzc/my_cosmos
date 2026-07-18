@@ -20,6 +20,30 @@ os.environ["HF_TOKEN"] = userdata.get("HF_TOKEN")
 !uv sync --extra train --extra fa2
 ```
 
+## 全自动方式
+
+完成上面的 token 设置和 `uv sync` 后，以下一条命令会自动挂载 Drive、
+下载或复用 Wan2.2 源码与 VAE、提取或复用 T5Gemma encoder、建立元数据
+索引、生成全部 1000 个图片 tar 清单、执行 preflight，并直接开始训练：
+
+```bash
+!uv run python scripts/bootstrap_deepghs_colab.py
+```
+
+第一次建议只跑两个图片 tar：
+
+```bash
+!uv run python scripts/bootstrap_deepghs_colab.py --smoke-shards 2
+```
+
+只准备所有资源但暂不启动训练：
+
+```bash
+!uv run python scripts/bootstrap_deepghs_colab.py --prepare-only
+```
+
+以下章节是需要拆开执行或排查某一步时使用的手动命令。
+
 ## 2. 首次建立标签索引
 
 源 Parquet 和构建临时文件放在 Colab 本地盘，最终索引才复制到 Drive：
