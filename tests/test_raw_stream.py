@@ -123,8 +123,14 @@ def test_rolling_dataset_offloads_before_yield_and_drops_partial_accumulation(
         shuffle_shards=False,
         delete_after_use=False,
     )
+    phases: list[str] = []
+    dataset.set_phase_hooks(
+        before_encode=lambda: phases.append("encode"),
+        before_train=lambda: phases.append("train"),
+    )
     iterator = iter(dataset)
     first = next(iterator)
+    assert phases[:2] == ["encode", "train"]
     assert encoder.device == "cpu"
     assert ("offload", "cpu") in encoder.events
     remaining = list(iterator)

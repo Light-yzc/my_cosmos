@@ -265,6 +265,8 @@ Hugging Face tar shard
   optimizer step 的输入等待比例和 CUDA 峰值日志。
 - DeepGHS L4 正式配置已关闭全模型 gradient checkpointing，并接入 W&B
   在线指标（loss/LR/吞吐/输入等待/CUDA 峰值/数据游标）。
+- Rolling GPU 阶段已改为 DiT/optimizer 与 Wan VAE 互斥换入，并修复在
+  OOM 异常作用域内递归导致失败激活滞留、最终 batch 1 仍 OOM 的问题。
 - https://huggingface.co/datasets/deepghs/danbooru2024-webp-4Mpixel
 - https://huggingface.co/datasets/p1atdev/danbooru-2024
 - https://github.com/deepghs/cheesechaser

@@ -248,6 +248,30 @@ def initialize_wandb(
     return run
 
 
+def _move_nested_tensors(value: Any, device: torch.device | str) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.to(device=device)
+    if isinstance(value, dict):
+        for key, item in value.items():
+            value[key] = _move_nested_tensors(item, device)
+        return value
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            value[index] = _move_nested_tensors(item, device)
+        return value
+    if isinstance(value, tuple):
+        return tuple(_move_nested_tensors(item, device) for item in value)
+    return value
+
+
+def move_optimizer_state(
+    optimizer: torch.optim.Optimizer,
+    device: torch.device | str,
+) -> None:
+    for state in optimizer.state.values():
+        _move_nested_tensors(state, device)
+
+
 def main() -> None:
     args = create_argument_parser().parse_args()
     raw = load_yaml(args.config)
@@ -267,9 +291,8 @@ def main() -> None:
     dtype, parameter_dtype = training_dtypes(train_config)
     seed = int(train_config.get("seed", 3407))
     seed_everything(seed)
-    torch.set_float32_matmul_precision("high")
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cuda.matmul.fp32_precision = "tf32"
+    torch.backends.cudnn.conv.fp32_precision = "tf32"
     torch.backends.cudnn.benchmark = True
 
     caption_config = DanbooruCaptionConfig(
@@ -386,6 +409,43 @@ def main() -> None:
     model = initialize_model(model_config, device, parameter_dtype)
     model.train()
     optimizer = build_optimizer(model, train_config)
+    if isinstance(dataset, RollingWanDataset):
+        train_state_on_gpu = True
+
+        def before_wan_encode() -> None:
+            nonlocal train_state_on_gpu
+            if not train_state_on_gpu:
+                return
+            started = time.perf_counter()
+            model.to("cpu")
+            move_optimizer_state(optimizer, "cpu")
+            train_state_on_gpu = False
+            torch.cuda.empty_cache()
+            print(
+                f"[phase] DiT+optimizer -> CPU in "
+                f"{time.perf_counter() - started:.1f}s; Wan VAE may use GPU",
+                flush=True,
+            )
+
+        def before_dit_train() -> None:
+            nonlocal train_state_on_gpu
+            if train_state_on_gpu:
+                return
+            started = time.perf_counter()
+            model.to(device)
+            move_optimizer_state(optimizer, device)
+            train_state_on_gpu = True
+            torch.cuda.empty_cache()
+            print(
+                f"[phase] DiT+optimizer -> GPU in "
+                f"{time.perf_counter() - started:.1f}s; starting training",
+                flush=True,
+            )
+
+        dataset.set_phase_hooks(
+            before_encode=before_wan_encode,
+            before_train=before_dit_train,
+        )
     max_steps = int(train_config["max_steps"])
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer,

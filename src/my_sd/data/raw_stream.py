@@ -366,6 +366,17 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
         self.resume_shard_index = 0
         self.resume_sample_index = -1
         self._encoder: ImageEncoder | None = None
+        self._before_encode: Callable[[], None] | None = None
+        self._before_train: Callable[[], None] | None = None
+
+    def set_phase_hooks(
+        self,
+        *,
+        before_encode: Callable[[], None],
+        before_train: Callable[[], None],
+    ) -> None:
+        self._before_encode = before_encode
+        self._before_train = before_train
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
@@ -424,13 +435,23 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
         pixels = torch.stack([item.pixels for item in items])
         if torch.cuda.is_available():
             pixels = pixels.pin_memory()
+        latents: Tensor | None = None
+        oom = False
         try:
             latents = encoder.encode_images(pixels)
         except torch.OutOfMemoryError:
+            # Leave the exception scope before retrying. Recursing from inside
+            # `except` retains the failed CUDA traceback and its activations,
+            # which can make even batch 1 fail after a larger probe OOM.
+            oom = True
+        if oom:
+            del pixels
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             if len(items) == 1:
-                raise
+                raise torch.OutOfMemoryError(
+                    "Wan VAE cannot encode a single image after clearing cache"
+                )
             midpoint = len(items) // 2
             self._effective_encode_batch_size = min(
                 self._effective_encode_batch_size,
@@ -447,6 +468,7 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
                 *self._encode_batch(encoder, items[:midpoint]),
                 *self._encode_batch(encoder, items[midpoint:]),
             ]
+        assert latents is not None
         if len(latents) != len(items):
             raise RuntimeError(
                 f"Wan encoder returned {len(latents)} latents for {len(items)} images"
@@ -506,6 +528,8 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
             max_cache_bytes=self.max_cache_bytes,
         )
 
+        if self._before_encode is not None:
+            self._before_encode()
         encoder = self._move_encoder_to_compute()
         pending_by_bucket: dict[str, list[PreparedImage]] = {}
         encoded_buffer: list[EncodedImage] = []
@@ -694,6 +718,8 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
                             flush=True,
                         )
                         self._offload_encoder(encoder)
+                        if self._before_train is not None:
+                            self._before_train()
                         for encoded in block:
                             yield {
                                 "latent": encoded.latent,
@@ -706,6 +732,8 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
                                 "source_sample_index": encoded.source_sample_index,
                             }
                             global_index += 1
+                        if self._before_encode is not None:
+                            self._before_encode()
                         encoder = self._move_encoder_to_compute()
                         encode_started = time.monotonic()
                         encoded_since_report = 0
@@ -728,6 +756,8 @@ class RollingWanDataset(IterableDataset[dict[str, Any]]):
             if usable:
                 block = pop_block(usable)
                 self._offload_encoder(encoder)
+                if self._before_train is not None:
+                    self._before_train()
                 for encoded in block:
                     yield {
                         "latent": encoded.latent,

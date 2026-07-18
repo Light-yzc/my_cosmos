@@ -154,6 +154,10 @@ def main() -> None:
     parser.add_argument("--smoke-shards", type=int)
     parser.add_argument("--prepare-only", action="store_true")
     args = parser.parse_args()
+    os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+    os.environ.setdefault(
+        "PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True"
+    )
     if args.smoke_shards is not None and args.smoke_shards < 1:
         raise ValueError("--smoke-shards must be positive")
 
