@@ -49,6 +49,36 @@ def ensure_token() -> str:
     return token
 
 
+def verify_deepghs_access(token: str) -> None:
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.errors import HfHubHTTPError
+
+    repo = "deepghs/danbooru2024-webp-4Mpixel"
+    print("verifying gated DeepGHS image access...", flush=True)
+    try:
+        probe = Path(
+            hf_hub_download(
+                repo_id=repo,
+                filename="images/0000.json",
+                repo_type="dataset",
+                local_dir="/content/deepghs_access_check",
+                token=token,
+            )
+        )
+    except HfHubHTTPError as error:
+        status = getattr(error.response, "status_code", None)
+        if status in {401, 403}:
+            raise RuntimeError(
+                "HF_TOKEN is valid for public metadata but its account cannot "
+                "read the gated DeepGHS images. Open "
+                "https://huggingface.co/datasets/deepghs/"
+                "danbooru2024-webp-4Mpixel while logged into the SAME account, "
+                "accept the access terms, then rerun this command."
+            ) from error
+        raise
+    print(f"DeepGHS image access verified: {probe.name}", flush=True)
+
+
 def ensure_wan_source(path: Path) -> None:
     module = path / "wan" / "modules" / "vae2_2.py"
     if module.is_file():
@@ -116,6 +146,7 @@ def main() -> None:
 
     ensure_drive()
     token = ensure_token()
+    verify_deepghs_access(token)
     models = Path("/content/models")
     args.drive_root.mkdir(parents=True, exist_ok=True)
 

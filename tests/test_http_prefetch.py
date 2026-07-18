@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from my_sd.data.tar_stream import (
     AsyncShardPrefetcher,
     _download_headers,
+    _parse_hf_source,
     shard_download_options,
 )
 
@@ -48,6 +49,17 @@ def test_huggingface_headers_use_cached_login(monkeypatch) -> None:
         "https://huggingface.co/datasets/owner/repo/resolve/main/train/a.tar"
     )
     assert headers["Authorization"] == "Bearer cached-token"
+
+
+def test_parse_hf_dataset_source() -> None:
+    assert _parse_hf_source(
+        "hf://datasets/deepghs/danbooru2024-webp-4Mpixel/images/0000.tar"
+    ) == (
+        "deepghs/danbooru2024-webp-4Mpixel",
+        "images/0000.tar",
+        "dataset",
+    )
+    assert _parse_hf_source("https://example.test/0000.tar") is None
 
 
 def test_http_prefetch_resumes_existing_part_file(tmp_path) -> None:

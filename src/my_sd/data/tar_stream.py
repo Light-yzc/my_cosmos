@@ -74,6 +74,19 @@ def _expand_hf_url(source: str) -> str:
     return f"https://huggingface.co/{prefix}{owner}/{repo}/resolve/main/{quoted_name}"
 
 
+def _parse_hf_source(source: str) -> tuple[str, str, str] | None:
+    if not source.startswith("hf://"):
+        return None
+    parts = source.removeprefix("hf://").split("/")
+    if len(parts) < 5 or parts[0] not in {"datasets", "models"}:
+        raise ValueError(
+            "HF URLs must look like hf://datasets/OWNER/REPO/path/to/file.tar"
+        )
+    kind, owner, repo, *filename = parts
+    repo_type = "dataset" if kind == "datasets" else "model"
+    return f"{owner}/{repo}", "/".join(filename), repo_type
+
+
 def _huggingface_token() -> str | None:
     for name in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
         token = os.environ.get(name)
@@ -273,6 +286,46 @@ class AsyncShardPrefetcher:
         local = Path(source)
         if local.is_file():
             return local.resolve(), False
+
+        hf_source = _parse_hf_source(source)
+        if hf_source is not None:
+            from huggingface_hub import hf_hub_download
+
+            repo_id, filename, repo_type = hf_source
+            basename = Path(filename).name
+            print(
+                f"[download] {basename}: Hugging Face/Xet transfer starting",
+                file=sys.stderr,
+                flush=True,
+            )
+            try:
+                path = Path(
+                    hf_hub_download(
+                        repo_id=repo_id,
+                        filename=filename,
+                        repo_type=repo_type,
+                        local_dir=self.cache_dir,
+                        token=_huggingface_token(),
+                    )
+                )
+            except Exception as error:
+                status = getattr(
+                    getattr(error, "response", None), "status_code", None
+                )
+                if status in {401, 403}:
+                    raise PermissionError(
+                        f"Hugging Face denied access to {repo_id}/{filename}. "
+                        "Open the dataset page with the same account as HF_TOKEN "
+                        "and accept its access terms."
+                    ) from error
+                raise
+            print(
+                f"[download] {basename}: ready "
+                f"({_human_bytes(path.stat().st_size)})",
+                file=sys.stderr,
+                flush=True,
+            )
+            return path, True
 
         url = _expand_hf_url(source)
         parsed = urllib.parse.urlparse(url)

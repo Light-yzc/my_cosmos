@@ -76,6 +76,9 @@ def main() -> None:
         flush=True,
     )
     connection = duckdb.connect()
+    # Partitioned COPY otherwise creates one file per worker per bucket, which
+    # is needlessly slow on Google Drive (roughly 17k tiny files on an L4 VM).
+    connection.execute("SET threads = 1")
     connection.execute("SET enable_progress_bar = true")
     connection.execute("SET progress_bar_time = 1000")
     started = __import__("time").monotonic()
