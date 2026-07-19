@@ -41,3 +41,7 @@ def test_deepghs_l4_config_uses_homogeneous_microbatch_four() -> None:
         == 16
     )
     assert loaded["model"]["gradient_checkpointing"] is False
+    preview = loaded["train"]["wandb"]["preview"]
+    assert preview["enabled"] is True
+    assert preview["every_steps"] == 1000
+    assert preview["width"] == preview["height"] == 512

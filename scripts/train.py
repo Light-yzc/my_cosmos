@@ -46,6 +46,11 @@ from my_sd.models import (
 from my_sd.training.flow_matching import flow_matching_loss, make_flow_matching_batch
 from my_sd.training.optimizers import build_optimizer
 from my_sd.training.precision import grad_scaler_enabled, training_dtypes
+from my_sd.training.preview import (
+    InferencePreview,
+    InferencePreviewConfig,
+    run_inference_previews,
+)
 from my_sd.training.text_cache import apply_cfg_dropout, encode_text_windows
 from my_sd.training.checkpoints import (
     AsyncCheckpointMirror,
@@ -278,6 +283,43 @@ def initialize_wandb(
     return run
 
 
+def inference_preview_config(
+    train_config: dict[str, Any],
+) -> InferencePreviewConfig:
+    wandb_config = train_config.get("wandb", {})
+    if not isinstance(wandb_config, dict):
+        raise TypeError("train.wandb must be a mapping")
+    preview = InferencePreviewConfig.from_mapping(wandb_config.get("preview"))
+    if preview.enabled and not bool(wandb_config.get("enabled", False)):
+        raise ValueError("train.wandb.preview requires train.wandb.enabled: true")
+    return preview
+
+
+def log_wandb_previews(
+    wandb_run: Any,
+    previews: list[InferencePreview],
+    *,
+    optimizer_step: int,
+    duration_seconds: float,
+    error: Exception | None = None,
+) -> None:
+    import wandb
+
+    values: dict[str, Any] = {
+        "train/optimizer_step": optimizer_step,
+        "preview/duration_seconds": duration_seconds,
+        "preview/status": "failed" if error is not None else "ok",
+    }
+    if previews:
+        values["preview/generated"] = [
+            wandb.Image(str(preview.path), caption=preview.prompt)
+            for preview in previews
+        ]
+    if error is not None:
+        values["preview/error"] = f"{type(error).__name__}: {error}"
+    wandb_run.log(values, step=optimizer_step, commit=True)
+
+
 def _move_nested_tensors(value: Any, device: torch.device | str) -> Any:
     if isinstance(value, torch.Tensor):
         return value.to(device=device)
@@ -311,6 +353,7 @@ def main() -> None:
     train_config = require_section(raw, "train")
     apply_runtime_overrides(args, data_config, train_config)
     wandb_run = initialize_wandb(raw, train_config)
+    preview_config = inference_preview_config(train_config)
     if wandb_run is not None:
         atexit.register(wandb_run.finish)
     accumulation = int(train_config.get("gradient_accumulation_steps", 1))
@@ -439,37 +482,38 @@ def main() -> None:
     model = initialize_model(model_config, device, parameter_dtype)
     model.train()
     optimizer = build_optimizer(model, train_config)
-    if isinstance(dataset, RollingWanDataset):
-        train_state_on_gpu = True
+    train_state_on_gpu = True
 
+    def move_train_state(
+        target: torch.device | str,
+        *,
+        message: str,
+    ) -> None:
+        nonlocal train_state_on_gpu
+        target_is_gpu = torch.device(target).type == "cuda"
+        if train_state_on_gpu == target_is_gpu:
+            return
+        started = time.perf_counter()
+        model.to(target)
+        move_optimizer_state(optimizer, target)
+        train_state_on_gpu = target_is_gpu
+        torch.cuda.empty_cache()
+        print(
+            f"[phase] {message} in {time.perf_counter() - started:.1f}s",
+            flush=True,
+        )
+
+    if isinstance(dataset, RollingWanDataset):
         def before_wan_encode() -> None:
-            nonlocal train_state_on_gpu
-            if not train_state_on_gpu:
-                return
-            started = time.perf_counter()
-            model.to("cpu")
-            move_optimizer_state(optimizer, "cpu")
-            train_state_on_gpu = False
-            torch.cuda.empty_cache()
-            print(
-                f"[phase] DiT+optimizer -> CPU in "
-                f"{time.perf_counter() - started:.1f}s; Wan VAE may use GPU",
-                flush=True,
+            move_train_state(
+                "cpu",
+                message="DiT+optimizer -> CPU; Wan VAE may use GPU",
             )
 
         def before_dit_train() -> None:
-            nonlocal train_state_on_gpu
-            if train_state_on_gpu:
-                return
-            started = time.perf_counter()
-            model.to(device)
-            move_optimizer_state(optimizer, device)
-            train_state_on_gpu = True
-            torch.cuda.empty_cache()
-            print(
-                f"[phase] DiT+optimizer -> GPU in "
-                f"{time.perf_counter() - started:.1f}s; starting training",
-                flush=True,
+            move_train_state(
+                device,
+                message="DiT+optimizer -> GPU; starting training",
             )
 
         dataset.set_phase_hooks(
@@ -745,15 +789,24 @@ def main() -> None:
                                 ],
                             }
                         )
-                    wandb_run.log(metrics, step=step)
+                    wandb_run.log(
+                        metrics,
+                        step=step,
+                        commit=not preview_config.is_due(step),
+                    )
                 if torch.cuda.is_available():
                     torch.cuda.reset_peak_memory_stats()
                 last_optimizer_finished = now
                 input_wait_window = 0.0
                 loss_sum_window.zero_()
                 loss_count_window = 0
-            if step % int(train_config.get("save_every", 5000)) == 0:
-                save_checkpoint(
+            preview_due = preview_config.is_due(step)
+            checkpoint_path: Path | None = None
+            if (
+                step % int(train_config.get("save_every", 5000)) == 0
+                or preview_due
+            ):
+                checkpoint_path = save_checkpoint(
                     model,
                     optimizer,
                     scheduler,
@@ -766,6 +819,66 @@ def main() -> None:
                     mirror=mirror,
                     keep_last=keep_last,
                 )
+            if preview_due:
+                assert checkpoint_path is not None
+                preview_started = time.perf_counter()
+                previews: list[InferencePreview] = []
+                preview_error: Exception | None = None
+                text_was_on_gpu = text_encoder.execution_device.type == "cuda"
+                try:
+                    print(
+                        f"[preview] step {step}: offloading training state and "
+                        f"running fixed-seed inference",
+                        flush=True,
+                    )
+                    if text_was_on_gpu:
+                        text_encoder.offload_to_cpu()
+                    move_train_state(
+                        "cpu",
+                        message="DiT+optimizer -> CPU; preview subprocess may use GPU",
+                    )
+                    previews = run_inference_previews(
+                        preview_config,
+                        training_config_path=args.config,
+                        checkpoint=checkpoint_path,
+                        output_dir=output_dir / "previews",
+                        optimizer_step=step,
+                        sample_script=ROOT / "scripts" / "sample.py",
+                        project_root=ROOT,
+                    )
+                except Exception as error:
+                    preview_error = error
+                    print(
+                        f"[preview] step {step} failed; training will continue: "
+                        f"{type(error).__name__}: {error}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                finally:
+                    move_train_state(
+                        device,
+                        message="DiT+optimizer -> GPU after preview",
+                    )
+                    if text_was_on_gpu:
+                        text_encoder.move_to_configured_device()
+                    model.train()
+                preview_duration = time.perf_counter() - preview_started
+                if wandb_run is not None:
+                    log_wandb_previews(
+                        wandb_run,
+                        previews,
+                        optimizer_step=step,
+                        duration_seconds=preview_duration,
+                        error=preview_error,
+                    )
+                print(
+                    f"[preview] step {step}: finished in "
+                    f"{preview_duration:.1f}s ({len(previews)} image(s))",
+                    flush=True,
+                )
+                # Keep the next per-step timing focused on training. The
+                # all-run seconds/step average still includes preview overhead.
+                last_optimizer_finished = time.perf_counter()
             if step >= max_steps:
                 break
             last_batch_finished = time.perf_counter()

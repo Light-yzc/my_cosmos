@@ -44,3 +44,19 @@ train:
     project: cosmos-anime
     name: cosmos-08b-deepghs-l4
     tags: [cosmos, anime, deepghs, l4, fa2]
+    preview:
+      enabled: true
+      # The current run resumes near step 10k, so the first preview appears
+      # quickly. Fixed prompt+seed makes image changes comparable over time.
+      every_steps: 1000
+      prompts:
+        - "1girl, solo, looking at viewer, detailed eyes, long blue hair, school uniform, simple background, best quality"
+      negative_prompt: "worst quality, low quality, blurry, malformed hands, extra fingers"
+      # A cheap progress probe: one 512px Euler sample costs far less than the
+      # final 768px, 28-step Heun quality sampler.
+      width: 512
+      height: 512
+      steps: 16
+      solver: euler
+      guidance_scale: 5.0
+      seed: 3407

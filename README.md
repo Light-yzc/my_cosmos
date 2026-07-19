@@ -301,6 +301,12 @@ uv run python scripts/sample.py \
   --output /content/drive/MyDrive/cosmos/sample.png
 ```
 
+DeepGHS L4 正式配置还会每 1000 optimizer step 自动保存当前 checkpoint，
+临时释放训练显存，并调用同一个 `scripts/sample.py` 做一张固定 prompt、固定
+seed 的 512×512 / 16-step Euler 预览。图片会记录到当前 W&B run 的
+`preview/generated`，可直接按 step 对比学习进展；预览失败只记录错误，不会
+中断长时间训练。最终质量判断仍应使用上面的 768×768 / 28-step Heun 命令。
+
 ## 主要参考
 
 - [NVIDIA Cosmos-Predict2 官方代码](https://github.com/nvidia-cosmos/cosmos-predict2)
